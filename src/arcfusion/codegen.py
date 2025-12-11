@@ -80,7 +80,7 @@ def extract_forward_body(code: str) -> str:
         if in_forward:
             # Check if we've exited the method (new def or class at same/lower indent)
             stripped = line.lstrip()
-            current_indent = len(line) - len(stripped) if stripped else 999
+            current_indent = len(line) - len(stripped) if stripped else float('inf')
 
             if stripped and (stripped.startswith('def ') or stripped.startswith('class ')):
                 if current_indent <= base_indent:

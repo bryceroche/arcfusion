@@ -10,6 +10,10 @@ from .db import ArcFusionDB, Component, Engine, ComponentRelationship
 # Lower than seed data (0.8) since extraction has more uncertainty
 DEFAULT_EXTRACTED_RELATIONSHIP_SCORE = 0.7
 
+# Confidence scaling: pattern occurrences are divided by this to get confidence 0-1
+# 10 occurrences = 100% confidence, fewer = proportionally less
+CONFIDENCE_SCALE_FACTOR = 10
+
 
 class PaperDecomposer:
     """Extract architecture components from paper text."""
@@ -59,7 +63,7 @@ class PaperDecomposer:
             for pattern in patterns:
                 if pattern in text_lower:
                     count = text_lower.count(pattern)
-                    confidence = min(1.0, count / 10)
+                    confidence = min(1.0, count / CONFIDENCE_SCALE_FACTOR)
 
                     found_components.append({
                         "category": category,

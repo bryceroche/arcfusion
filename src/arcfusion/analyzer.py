@@ -26,6 +26,7 @@ MAX_CONTENT_LENGTH = 15000  # Max characters to pass to LLM
 MAX_COMPLETION_TOKENS = 8192  # Max tokens for LLM response
 DEFAULT_MIN_CONFIDENCE = 0.7  # Minimum confidence to include component
 DEFAULT_RELATIONSHIP_SCORE = 0.5  # Fallback score for invalid relationship scores
+DEFAULT_MODEL = "claude-sonnet-4-20250514"  # Default Claude model for analysis
 
 
 @dataclass
@@ -176,7 +177,7 @@ class PaperAnalyzer:
         title: str,
         content: str,
         paper_id: str = "",
-        model: str = "claude-sonnet-4-20250514",
+        model: str = DEFAULT_MODEL,
         verbose: bool = True
     ) -> Optional[AnalysisResult]:
         """
