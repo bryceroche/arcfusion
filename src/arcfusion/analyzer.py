@@ -41,6 +41,7 @@ class AnalyzedComponent:
     builds_on: list  # Existing components it extends/replaces
     confidence: float  # How confident the LLM is (0-1)
     code_sketch: str  # PyTorch pseudocode
+    position: int = 0  # Order in architecture (0=first, higher=later in forward pass)
 
 
 @dataclass
@@ -82,6 +83,7 @@ IMPORTANT: You have deep knowledge of this paper beyond just the abstract. Use y
 For EACH component, provide:
 - The specific name as used in or derived from this paper
 - Category (one of: attention, structure, layer, position, training, efficiency, output)
+- **Position in architecture** (0=first component in forward pass, increasing numbers for later components)
 - Detailed description of what it does
 - Input/output interfaces with shapes
 - All hyperparameters with the values used in the paper
@@ -90,6 +92,10 @@ For EACH component, provide:
 - Whether parallelizable and/or causal
 - What makes it novel or how it differs from prior work
 - PyTorch code sketch
+
+IMPORTANT: Component ORDER matters! List components in the order they appear in the forward pass:
+- For Transformer: Embedding(0) → PositionalEncoding(1) → Attention(2) → LayerNorm(3) → FFN(4) → Output(5)
+- The "position" field should reflect where data flows through this component
 
 Include components even if they build on prior work - what matters is how THIS paper defines/uses them.
 
@@ -101,6 +107,7 @@ Respond in this exact JSON format:
         {{
             "name": "ComponentName",
             "category": "attention|structure|layer|position|training|efficiency|output",
+            "position": 0,
             "description": "Detailed description",
             "interface_in": {{"shape": "[batch, seq_len, d_model]", "dtype": "float32"}},
             "interface_out": {{"shape": "[batch, seq_len, d_model]", "dtype": "float32"}},
@@ -197,7 +204,7 @@ class PaperAnalyzer:
 
             # Parse into structured result
             novel_components = []
-            for comp_data in data.get("novel_components", []):
+            for i, comp_data in enumerate(data.get("novel_components", [])):
                 comp = AnalyzedComponent(
                     name=comp_data.get("name", "Unknown"),
                     description=comp_data.get("description", ""),
@@ -215,8 +222,12 @@ class PaperAnalyzer:
                     builds_on=comp_data.get("builds_on", []),
                     confidence=comp_data.get("confidence", 0.5),
                     code_sketch=comp_data.get("code_sketch", ""),
+                    position=comp_data.get("position", i),  # Use index as fallback
                 )
                 novel_components.append(comp)
+
+            # Sort by position to ensure correct architectural order
+            novel_components.sort(key=lambda c: c.position)
 
             result = AnalysisResult(
                 paper_title=title,
@@ -232,7 +243,7 @@ class PaperAnalyzer:
             if verbose:
                 print(f"  Found {len(novel_components)} novel components")
                 for comp in novel_components:
-                    print(f"    - {comp.name} (confidence: {comp.confidence:.0%})")
+                    print(f"    [{comp.position}] {comp.name} (confidence: {comp.confidence:.0%})")
 
             return result
 
