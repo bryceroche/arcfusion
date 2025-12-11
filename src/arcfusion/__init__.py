@@ -32,6 +32,30 @@ except ImportError:
     AnalysisResult = None
     AnalyzedComponent = None
 
+# Optional validation pipeline (requires torch)
+try:
+    from .validator import (
+        ValidationPipeline,
+        ValidationResult,
+        ModelBuilder,
+        TrainingHarness,
+        BenchmarkRunner,
+        ModelConfig,
+        TrainingConfig,
+        HAS_TORCH,
+    )
+    # Only mark as available if torch is actually importable
+    HAS_VALIDATOR = HAS_TORCH
+except ImportError:
+    HAS_VALIDATOR = False
+    ValidationPipeline = None
+    ValidationResult = None
+    ModelBuilder = None
+    TrainingHarness = None
+    BenchmarkRunner = None
+    ModelConfig = None
+    TrainingConfig = None
+
 __version__ = "0.2.0"
 __all__ = [
     # Database
@@ -59,6 +83,15 @@ __all__ = [
     "AnalysisResult",
     "AnalyzedComponent",
     "HAS_ANALYZER",
+    # Validation pipeline (optional)
+    "ValidationPipeline",
+    "ValidationResult",
+    "ModelBuilder",
+    "TrainingHarness",
+    "BenchmarkRunner",
+    "ModelConfig",
+    "TrainingConfig",
+    "HAS_VALIDATOR",
     # Seeding
     "seed_transformers",
     "seed_modern_architectures",

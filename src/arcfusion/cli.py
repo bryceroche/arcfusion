@@ -13,6 +13,13 @@ from .fetcher import ArxivFetcher
 from .dedup import ComponentDeduplicator, find_duplicate_engines
 from .codegen import CodeGenerator
 
+# Conditional import for validator (requires torch)
+try:
+    from .validator import ValidationPipeline, ModelConfig, TrainingConfig
+    HAS_VALIDATOR = True
+except ImportError:
+    HAS_VALIDATOR = False
+
 # CLI display constants
 SEPARATOR_WIDTH = 60
 SEPARATOR = "-" * SEPARATOR_WIDTH
@@ -566,6 +573,102 @@ def cmd_generate(args: argparse.Namespace) -> None:
             print(f"  - {name}")
 
 
+def cmd_validate(args: argparse.Namespace) -> None:
+    """Validate a dreamed architecture by building, training, and benchmarking."""
+    if not HAS_VALIDATOR:
+        print("[ERROR] Validator requires PyTorch. Install with: pip install torch")
+        sys.exit(1)
+
+    with ArcFusionDB(args.db) as db:
+        gen = CodeGenerator(db)
+        kwargs = _build_dream_kwargs(args)
+
+        # Step 1: Dream and generate code
+        print(f"Dreaming architecture using '{args.strategy}' strategy...")
+        try:
+            generated = gen.generate_from_dream(args.strategy, name=args.name, **kwargs)
+        except ValueError as e:
+            print(f"[ERROR] Dream failed: {e}")
+            sys.exit(1)
+
+        print(f"Generated: {generated.name} with {generated.num_components} components")
+        for name in generated.component_names:
+            print(f"  - {name}")
+        print()
+
+        # Step 2: Configure validation
+        model_config = ModelConfig(
+            d_model=args.d_model,
+            vocab_size=args.vocab_size,
+            max_seq_len=args.seq_len,
+            n_heads=args.n_heads,
+        )
+        training_config = TrainingConfig(
+            batch_size=args.batch_size,
+            max_steps=args.max_steps,
+            learning_rate=args.lr,
+            device=args.device,
+        )
+
+        # Step 3: Run validation pipeline
+        pipeline = ValidationPipeline(
+            db=db,
+            model_config=model_config,
+            training_config=training_config,
+        )
+
+        result = pipeline.validate(generated, verbose=True)
+
+        # Step 4: Report results
+        print(f"\n{SECTION_SEPARATOR}")
+        print("Validation Summary")
+        print(SEPARATOR)
+        print(f"  Model: {result.model_name}")
+        print(f"  Success: {'Yes' if result.success else 'No'}")
+        print(f"  Parameters: {result.num_parameters:,}")
+
+        if result.build_error:
+            print(f"  Build Error: {result.build_error}")
+        if result.train_error:
+            print(f"  Train Error: {result.train_error}")
+
+        if result.success:
+            print(f"  Final Loss: {result.final_loss:.4f}")
+            print(f"  Perplexity: {result.perplexity:.2f}")
+            print(f"  Training Steps: {result.training_steps}")
+            print(f"  Training Time: {result.training_time_seconds:.1f}s")
+
+            if result.benchmarks:
+                print(f"\nBenchmarks:")
+                for name, score in result.benchmarks.items():
+                    print(f"    {name}: {score:.4f}")
+
+        # Step 5: Store results if requested
+        if args.store and result.success:
+            # Create a dreamed engine entry to associate results with
+            from .composer import EngineComposer
+            composer = EngineComposer(db)
+            components, _ = composer.dream(args.strategy, **kwargs)
+
+            # Store benchmark results
+            for bench_name, score in result.benchmarks.items():
+                from .db import BenchmarkResult
+                benchmark = BenchmarkResult(
+                    engine_id=generated.name,  # Use name as pseudo-ID
+                    benchmark_name=bench_name,
+                    score=score,
+                    parameters={
+                        'd_model': model_config.d_model,
+                        'vocab_size': model_config.vocab_size,
+                        'max_steps': training_config.max_steps,
+                    },
+                    notes=f"Auto-validated dreamed architecture"
+                )
+                db.add_benchmark(benchmark)
+
+            print(f"\nStored {len(result.benchmarks)} benchmark results")
+
+
 def main() -> None:
     """
     ArcFusion CLI entry point.
@@ -577,6 +680,7 @@ def main() -> None:
     - show: Display details about a component or engine
     - dream: Compose new architectures using various strategies
     - generate: Generate runnable PyTorch code from dreamed architectures
+    - validate: Build, train, and benchmark dreamed architectures (requires PyTorch)
     - ingest: Import papers from arXiv
     - analyze: Deep LLM-powered component extraction (requires ANTHROPIC_API_KEY)
     - dedup: Find and merge duplicate components
@@ -719,6 +823,40 @@ Examples:
     bench_parser.add_argument("--limit", type=int, default=20, help="Max results for leaderboard (default: 20)")
     bench_parser.add_argument("--lower-better", action="store_true", help="Lower score is better (e.g., perplexity)")
 
+    # validate (auto-validation pipeline)
+    val_parser = subparsers.add_parser(
+        "validate",
+        help="Build, train, and benchmark a dreamed architecture (requires PyTorch)",
+        description="Dream an architecture, compile it to a runnable PyTorch model, "
+                    "train on synthetic data, and measure performance. This validates "
+                    "that dreamed architectures actually work."
+    )
+    val_parser.add_argument(
+        "strategy",
+        choices=["greedy", "random", "mutate", "crossover"],
+        help="Composition strategy for dreaming"
+    )
+    val_parser.add_argument("--name", "-n", default="ValidatedModel", help="Name for the model")
+    # Dream strategy args
+    val_parser.add_argument("--start", help="Starting component for greedy")
+    val_parser.add_argument("--steps", type=int, default=5, help="Components for random")
+    val_parser.add_argument("--temperature", type=float, default=1.0, help="Temperature for random")
+    val_parser.add_argument("--engine", help="Engine to mutate")
+    val_parser.add_argument("--rate", type=float, default=0.2, help="Mutation rate")
+    val_parser.add_argument("--engine1", help="First parent for crossover")
+    val_parser.add_argument("--engine2", help="Second parent for crossover")
+    # Model config
+    val_parser.add_argument("--d-model", dest="d_model", type=int, default=128, help="Model dimension (default: 128)")
+    val_parser.add_argument("--vocab-size", dest="vocab_size", type=int, default=1000, help="Vocabulary size (default: 1000)")
+    val_parser.add_argument("--seq-len", dest="seq_len", type=int, default=64, help="Sequence length (default: 64)")
+    val_parser.add_argument("--n-heads", dest="n_heads", type=int, default=4, help="Attention heads (default: 4)")
+    # Training config
+    val_parser.add_argument("--batch-size", dest="batch_size", type=int, default=8, help="Batch size (default: 8)")
+    val_parser.add_argument("--max-steps", dest="max_steps", type=int, default=100, help="Training steps (default: 100)")
+    val_parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate (default: 1e-4)")
+    val_parser.add_argument("--device", default="cpu", help="Device: cpu or cuda (default: cpu)")
+    val_parser.add_argument("--store", action="store_true", help="Store benchmark results in database")
+
     args = parser.parse_args()
 
     if args.command == "init":
@@ -743,6 +881,8 @@ Examples:
         cmd_config(args)
     elif args.command == "benchmark":
         cmd_benchmark(args)
+    elif args.command == "validate":
+        cmd_validate(args)
     else:
         parser.print_help()
         sys.exit(1)
