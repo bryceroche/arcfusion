@@ -464,8 +464,8 @@ class EngineComposer:
             # Return empty with score of -1 to indicate failure (vs 0.0 for very low score)
             return [], -1.0
 
-        # Base score from component quality
-        base_score = sum(c.usefulness_score for c in components) / len(components)
+        # Base score from component quality (guard against empty list)
+        base_score = sum(c.usefulness_score for c in components) / max(len(components), 1)
 
         # Interface flow bonus - components should connect well in sequence
         interface_bonus = 0.0

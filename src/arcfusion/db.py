@@ -14,7 +14,7 @@ import sqlite3
 import json
 import hashlib
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Optional
 from pathlib import Path
 
 
@@ -316,7 +316,7 @@ class ArcFusionDB:
         self.conn.commit()
         return cursor.rowcount > 0
 
-    def _safe_json_loads(self, value: str, default):
+    def _safe_json_loads(self, value: Optional[str], default: Any) -> Any:
         """Safely parse JSON, returning default on error."""
         if not value:
             return default

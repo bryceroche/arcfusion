@@ -13,6 +13,23 @@ from .dedup import ComponentDeduplicator, find_duplicate_engines
 from .codegen import CodeGenerator
 
 
+def _build_dream_kwargs(args) -> dict:
+    """Build kwargs dict for dream/compose strategies from CLI args."""
+    kwargs = {}
+    if args.strategy == "greedy" and getattr(args, 'start', None):
+        kwargs["start_component"] = args.start
+    elif args.strategy == "random":
+        kwargs["steps"] = args.steps
+        kwargs["temperature"] = args.temperature
+    elif args.strategy == "mutate":
+        kwargs["engine_name"] = args.engine
+        kwargs["mutation_rate"] = args.rate
+    elif args.strategy == "crossover":
+        kwargs["engine1_name"] = args.engine1
+        kwargs["engine2_name"] = args.engine2
+    return kwargs
+
+
 def cmd_init(args):
     """Initialize database with seed data."""
     with ArcFusionDB(args.db) as db:
@@ -67,19 +84,7 @@ def cmd_dream(args):
     """Dream up a new architecture."""
     with ArcFusionDB(args.db) as db:
         composer = EngineComposer(db)
-
-        kwargs = {}
-        if args.strategy == "greedy" and args.start:
-            kwargs["start_component"] = args.start
-        elif args.strategy == "random":
-            kwargs["steps"] = args.steps
-            kwargs["temperature"] = args.temperature
-        elif args.strategy == "mutate":
-            kwargs["engine_name"] = args.engine
-            kwargs["mutation_rate"] = args.rate
-        elif args.strategy == "crossover":
-            kwargs["engine1_name"] = args.engine1
-            kwargs["engine2_name"] = args.engine2
+        kwargs = _build_dream_kwargs(args)
 
         try:
             components, score = composer.dream(args.strategy, **kwargs)
@@ -276,20 +281,7 @@ def cmd_generate(args):
     """Generate PyTorch code from a dreamed architecture."""
     with ArcFusionDB(args.db) as db:
         gen = CodeGenerator(db)
-
-        # Build kwargs for dream strategy
-        kwargs = {}
-        if args.strategy == "greedy" and args.start:
-            kwargs["start_component"] = args.start
-        elif args.strategy == "random":
-            kwargs["steps"] = args.steps
-            kwargs["temperature"] = args.temperature
-        elif args.strategy == "mutate":
-            kwargs["engine_name"] = args.engine
-            kwargs["mutation_rate"] = args.rate
-        elif args.strategy == "crossover":
-            kwargs["engine1_name"] = args.engine1
-            kwargs["engine2_name"] = args.engine2
+        kwargs = _build_dream_kwargs(args)
 
         # Generate
         try:
