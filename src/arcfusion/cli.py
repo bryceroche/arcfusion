@@ -7,6 +7,8 @@ import sys
 from .db import ArcFusionDB
 from .composer import EngineComposer
 from .seeds import seed_transformers, seed_modern_architectures
+from .fetcher import ArxivFetcher
+from .dedup import ComponentDeduplicator, find_duplicate_engines
 
 
 def cmd_init(args):
@@ -119,8 +121,21 @@ def cmd_show(args):
             print(f"  ID: {comp.component_id}")
             print(f"  Score: {comp.usefulness_score}")
             print(f"  Description: {comp.description}")
+            if comp.source_paper_id:
+                print(f"  Source paper: {comp.source_paper_id} ({comp.introduced_year})")
             print(f"  Interface in: {comp.interface_in}")
             print(f"  Interface out: {comp.interface_out}")
+            if comp.time_complexity:
+                print(f"  Time complexity: {comp.time_complexity}")
+            if comp.space_complexity:
+                print(f"  Space complexity: {comp.space_complexity}")
+            if comp.flops_formula:
+                print(f"  FLOPs: {comp.flops_formula}")
+            print(f"  Parallelizable: {comp.is_parallelizable}, Causal: {comp.is_causal}")
+            if comp.math_operations:
+                print(f"  Math ops: {', '.join(comp.math_operations)}")
+            if comp.hyperparameters:
+                print(f"  Hyperparameters: {comp.hyperparameters}")
 
             compatible = db.get_compatible_components(comp.component_id, min_score=0.7)
             if compatible:
@@ -131,6 +146,127 @@ def cmd_show(args):
                         print(f"    - {c.name}: {score:.2f}")
         else:
             print(f"Not found: {args.name}")
+
+    db.close()
+
+
+def cmd_ingest(args):
+    """Ingest papers from arXiv."""
+    db = ArcFusionDB(args.db)
+    fetcher = ArxivFetcher(db)
+
+    if args.query:
+        # Custom search query
+        print(f"Searching arXiv for: {args.query}")
+        stats = fetcher.ingest_search(args.query, max_results=args.max)
+    elif args.ids:
+        # Specific paper IDs
+        print(f"Fetching {len(args.ids)} specific papers...")
+        papers = fetcher.fetch_by_ids(args.ids)
+        stats = fetcher.ingest_batch(papers, max_papers=len(args.ids))
+    else:
+        # Default: search for architecture papers
+        print(f"Searching for ML architecture papers in {args.category}...")
+        stats = fetcher.ingest_architectures(
+            max_results=args.max,
+            category=args.category
+        )
+
+    # Show updated DB stats
+    print(f"\nDatabase stats: {db.stats()}")
+    db.close()
+
+
+def cmd_analyze(args):
+    """Deep LLM analysis of papers."""
+    try:
+        from .analyzer import PaperAnalyzer
+    except ImportError:
+        print("Error: anthropic package required for LLM analysis")
+        print("Install with: pip install 'arcfusion[llm]'")
+        sys.exit(1)
+
+    import os
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        print("Error: ANTHROPIC_API_KEY environment variable required")
+        sys.exit(1)
+
+    db = ArcFusionDB(args.db)
+    fetcher = ArxivFetcher(db)
+    analyzer = PaperAnalyzer(db)
+
+    total_new = 0
+    for arxiv_id in args.ids:
+        print(f"\n{'='*60}")
+        print(f"Fetching {arxiv_id}...")
+
+        paper = fetcher.fetch_by_id(arxiv_id)
+        if not paper:
+            print(f"  Could not fetch paper {arxiv_id}")
+            continue
+
+        engine, new_components = analyzer.analyze_and_ingest(
+            title=paper.title,
+            content=paper.abstract,
+            paper_id=paper.arxiv_id,
+            paper_url=paper.pdf_url,
+            min_confidence=args.min_confidence,
+        )
+
+        total_new += len(new_components)
+
+    print(f"\n{'='*60}")
+    print(f"Analysis complete. Added {total_new} new components.")
+    print(f"Database stats: {db.stats()}")
+    db.close()
+
+
+def cmd_dedup(args):
+    """Find and merge duplicate components."""
+    db = ArcFusionDB(args.db)
+    deduplicator = ComponentDeduplicator(db)
+
+    # Find duplicates
+    print(f"Scanning for duplicates (threshold: {args.threshold})...\n")
+    groups = deduplicator.find_duplicates(threshold=args.threshold)
+
+    if not groups:
+        print("No duplicates found!")
+        db.close()
+        return
+
+    print(f"Found {len(groups)} duplicate groups:\n")
+    print("=" * 60)
+
+    for i, group in enumerate(groups, 1):
+        print(f"\n{i}. KEEP: {group.canonical.name}")
+        print(f"   (ID: {group.canonical.component_id[:8]}, score: {group.canonical.usefulness_score:.2f}, has_code: {bool(group.canonical.code.strip())})")
+        print(f"   Reason: {group.similarity_reason}")
+        print(f"   MERGE:")
+        for dup in group.duplicates:
+            print(f"     - {dup.name} ({dup.component_id[:8]}, score: {dup.usefulness_score:.2f})")
+
+    # Also check for duplicate engines
+    dup_engines = find_duplicate_engines(db)
+    if dup_engines:
+        print(f"\n{'=' * 60}")
+        print(f"\nFound {len(dup_engines)} duplicate engine pairs:")
+        for e1, e2, reason in dup_engines:
+            print(f"  - {e1.name} ({e1.engine_id[:8]}) <-> {e2.name} ({e2.engine_id[:8]})")
+            print(f"    Reason: {reason}")
+
+    if args.dry_run:
+        print(f"\n{'=' * 60}")
+        print("\n[DRY RUN] No changes made. Use --apply to merge duplicates.")
+    else:
+        print(f"\n{'=' * 60}")
+        print("\nMerging duplicates...")
+        for group in groups:
+            result = deduplicator.merge_group(group, dry_run=False)
+            print(f"  Merged {len(result['merged'])} duplicates into '{result['canonical']}'")
+
+        print(f"\nDone! Merged {sum(len(g.duplicates) for g in groups)} components.")
+        print(f"Database stats: {db.stats()}")
 
     db.close()
 
@@ -182,6 +318,23 @@ Examples:
     dream_parser.add_argument("--engine1", help="First engine (crossover)")
     dream_parser.add_argument("--engine2", help="Second engine (crossover)")
 
+    # ingest
+    ingest_parser = subparsers.add_parser("ingest", help="Ingest papers from arXiv")
+    ingest_parser.add_argument("--query", "-q", help="Custom arXiv search query")
+    ingest_parser.add_argument("--ids", nargs="+", help="Specific arXiv IDs to fetch")
+    ingest_parser.add_argument("--category", "-c", default="cs.LG", help="arXiv category (default: cs.LG)")
+    ingest_parser.add_argument("--max", "-m", type=int, default=20, help="Max papers to ingest (default: 20)")
+
+    # analyze (LLM-powered deep analysis)
+    analyze_parser = subparsers.add_parser("analyze", help="LLM-powered component extraction (requires ANTHROPIC_API_KEY)")
+    analyze_parser.add_argument("--ids", nargs="+", required=True, help="arXiv IDs to analyze")
+    analyze_parser.add_argument("--min-confidence", type=float, default=0.7, help="Min confidence to add component (default: 0.7)")
+
+    # dedup (find and merge duplicates)
+    dedup_parser = subparsers.add_parser("dedup", help="Find and merge duplicate components")
+    dedup_parser.add_argument("--threshold", type=float, default=0.5, help="Similarity threshold (0-1, default: 0.5)")
+    dedup_parser.add_argument("--apply", dest="dry_run", action="store_false", default=True, help="Apply changes (default is dry-run)")
+
     args = parser.parse_args()
 
     if args.command == "init":
@@ -194,6 +347,12 @@ Examples:
         cmd_show(args)
     elif args.command == "dream":
         cmd_dream(args)
+    elif args.command == "ingest":
+        cmd_ingest(args)
+    elif args.command == "analyze":
+        cmd_analyze(args)
+    elif args.command == "dedup":
+        cmd_dedup(args)
     else:
         parser.print_help()
         sys.exit(1)
