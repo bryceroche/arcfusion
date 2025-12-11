@@ -123,6 +123,27 @@ class DreamedEngine:
             self.parent_engine_ids = []
 
 
+@dataclass
+class ComponentConfiguration:
+    """A proven sub-configuration of components that work well together."""
+    name: str
+    component_ids: list  # Ordered list of component IDs
+    description: str = ""
+    source_engine_id: str = ""  # Engine this config was extracted from
+    config_score: float = 0.0  # How well this config performs
+    usage_count: int = 0  # How often used in dreams
+    validated: bool = False  # Has been tested/validated
+    config_id: str = ""
+    created_at: str = ""
+
+    def __post_init__(self):
+        if not self.config_id:
+            content = f"{self.name}{json.dumps(self.component_ids, sort_keys=True)}"
+            self.config_id = hashlib.sha256(content.encode()).hexdigest()[:12]
+        if self.component_ids is None:
+            self.component_ids = []
+
+
 class ArcFusionDB:
     """SQLite database for ML architecture components and engines"""
 
@@ -239,6 +260,20 @@ class ArcFusionDB:
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
 
+            -- Component configurations: proven sub-architectures
+            CREATE TABLE IF NOT EXISTS component_configurations (
+                config_id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                description TEXT,
+                component_ids TEXT NOT NULL,
+                source_engine_id TEXT,
+                config_score REAL DEFAULT 0.0,
+                usage_count INTEGER DEFAULT 0,
+                validated BOOLEAN DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (source_engine_id) REFERENCES engines(engine_id)
+            );
+
             -- Indexes
             CREATE INDEX IF NOT EXISTS idx_comp_usefulness ON components(usefulness_score DESC);
             CREATE INDEX IF NOT EXISTS idx_comp_complexity ON components(time_complexity);
@@ -251,6 +286,9 @@ class ArcFusionDB:
             CREATE INDEX IF NOT EXISTS idx_bench_score ON benchmark_results(score DESC);
             CREATE INDEX IF NOT EXISTS idx_dream_strategy ON dreamed_engines(strategy);
             CREATE INDEX IF NOT EXISTS idx_dream_validated ON dreamed_engines(validated);
+            CREATE INDEX IF NOT EXISTS idx_config_score ON component_configurations(config_score DESC);
+            CREATE INDEX IF NOT EXISTS idx_config_usage ON component_configurations(usage_count DESC);
+            CREATE INDEX IF NOT EXISTS idx_config_validated ON component_configurations(validated);
         """)
         self.conn.commit()
 
@@ -739,6 +777,122 @@ class ArcFusionDB:
         return cursor.rowcount > 0
 
     # -------------------------------------------------------------------------
+    # Component configuration operations
+    # -------------------------------------------------------------------------
+    def add_configuration(self, config: ComponentConfiguration) -> str:
+        """Add a component configuration."""
+        self.conn.execute("""
+            INSERT OR REPLACE INTO component_configurations
+            (config_id, name, description, component_ids, source_engine_id,
+             config_score, usage_count, validated)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            config.config_id,
+            config.name,
+            config.description,
+            json.dumps(config.component_ids),
+            config.source_engine_id or None,
+            config.config_score,
+            config.usage_count,
+            1 if config.validated else 0
+        ))
+        self.conn.commit()
+        return config.config_id
+
+    def get_configuration(self, config_id: str) -> Optional[ComponentConfiguration]:
+        """Retrieve a configuration by ID."""
+        row = self.conn.execute(
+            "SELECT * FROM component_configurations WHERE config_id = ?", (config_id,)
+        ).fetchone()
+        if row:
+            return self._row_to_configuration(row)
+        return None
+
+    def _row_to_configuration(self, row) -> ComponentConfiguration:
+        """Convert a database row to a ComponentConfiguration object."""
+        return ComponentConfiguration(
+            config_id=row['config_id'],
+            name=row['name'],
+            description=row['description'] or "",
+            component_ids=self._safe_json_loads(row['component_ids'], []),
+            source_engine_id=row['source_engine_id'] or "",
+            config_score=row['config_score'] or 0.0,
+            usage_count=row['usage_count'] or 0,
+            validated=bool(row['validated']),
+            created_at=row['created_at'] or ""
+        )
+
+    def find_configurations(
+        self,
+        min_score: float = None,
+        validated: bool = None,
+        min_size: int = None,
+        max_size: int = None
+    ) -> list[ComponentConfiguration]:
+        """Find configurations matching criteria."""
+        query = "SELECT * FROM component_configurations WHERE 1=1"
+        params = []
+
+        if min_score is not None:
+            query += " AND config_score >= ?"
+            params.append(min_score)
+        if validated is not None:
+            query += " AND validated = ?"
+            params.append(1 if validated else 0)
+
+        query += " ORDER BY config_score DESC, usage_count DESC"
+        rows = self.conn.execute(query, params).fetchall() or []
+
+        configs = [self._row_to_configuration(r) for r in rows]
+
+        # Filter by size in Python (component_ids is JSON)
+        if min_size is not None:
+            configs = [c for c in configs if len(c.component_ids) >= min_size]
+        if max_size is not None:
+            configs = [c for c in configs if len(c.component_ids) <= max_size]
+
+        return configs
+
+    def increment_config_usage(self, config_id: str) -> bool:
+        """Increment usage count for a configuration."""
+        cursor = self.conn.execute("""
+            UPDATE component_configurations
+            SET usage_count = usage_count + 1
+            WHERE config_id = ?
+        """, (config_id,))
+        self.conn.commit()
+        return cursor.rowcount > 0
+
+    def validate_configuration(self, config_id: str, score: float) -> bool:
+        """Mark a configuration as validated with actual score."""
+        cursor = self.conn.execute("""
+            UPDATE component_configurations
+            SET validated = 1, config_score = ?
+            WHERE config_id = ?
+        """, (score, config_id))
+        self.conn.commit()
+        return cursor.rowcount > 0
+
+    def delete_configuration(self, config_id: str) -> bool:
+        """Delete a configuration."""
+        cursor = self.conn.execute(
+            "DELETE FROM component_configurations WHERE config_id = ?",
+            (config_id,)
+        )
+        self.conn.commit()
+        return cursor.rowcount > 0
+
+    def find_configurations_containing(self, component_id: str) -> list[ComponentConfiguration]:
+        """Find all configurations that contain a specific component."""
+        # Since component_ids is stored as JSON, we use LIKE for matching
+        rows = self.conn.execute("""
+            SELECT * FROM component_configurations
+            WHERE component_ids LIKE ?
+            ORDER BY config_score DESC
+        """, (f'%"{component_id}"%',)).fetchall() or []
+        return [self._row_to_configuration(r) for r in rows]
+
+    # -------------------------------------------------------------------------
     # Component compatibility operations (aggregate scores)
     # -------------------------------------------------------------------------
     def update_compatibility_scores(self):
@@ -777,6 +931,7 @@ class ArcFusionDB:
         return {
             'components': self.conn.execute("SELECT COUNT(*) FROM components").fetchone()[0],
             'engines': self.conn.execute("SELECT COUNT(*) FROM engines").fetchone()[0],
+            'configurations': self.conn.execute("SELECT COUNT(*) FROM component_configurations").fetchone()[0],
             'relationships': self.conn.execute("SELECT COUNT(*) FROM component_relationships").fetchone()[0],
             'compatibility_pairs': self.conn.execute("SELECT COUNT(*) FROM component_compatibility").fetchone()[0],
             'processed_papers': self.conn.execute("SELECT COUNT(*) FROM processed_papers").fetchone()[0],

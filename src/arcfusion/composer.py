@@ -489,3 +489,112 @@ class EngineComposer:
 
         estimated_score = min(1.0, base_score + interface_bonus + diversity_bonus + pair_bonus)
         return components, estimated_score
+
+    # -------------------------------------------------------------------------
+    # Configuration extraction and management
+    # -------------------------------------------------------------------------
+    def extract_configurations_from_engine(
+        self,
+        engine_name: str,
+        min_size: int = 2,
+        max_size: int = None
+    ) -> list['ComponentConfiguration']:
+        """
+        Extract common component configurations from an engine.
+
+        Generates all contiguous sub-sequences of components that could be
+        useful as reusable building blocks.
+
+        Args:
+            engine_name: Name of engine to extract from
+            min_size: Minimum number of components in a config (default 2)
+            max_size: Maximum number of components (default: engine size - 1)
+
+        Returns:
+            List of ComponentConfiguration objects
+        """
+        from .db import ComponentConfiguration
+
+        engine = self.db.get_engine_by_name(engine_name)
+        if not engine or not engine.component_ids:
+            return []
+
+        components = [self.db.get_component(cid) for cid in engine.component_ids]
+        components = [c for c in components if c]  # Filter None
+
+        if len(components) < min_size:
+            return []
+
+        if max_size is None:
+            max_size = len(components) - 1
+
+        configs = []
+
+        # Generate all contiguous sub-sequences
+        for size in range(min_size, min(max_size + 1, len(components))):
+            for start in range(len(components) - size + 1):
+                sub_components = components[start:start + size]
+                comp_ids = [c.component_id for c in sub_components]
+                comp_names = [c.name for c in sub_components]
+
+                # Create a descriptive name
+                if size <= 3:
+                    name = " + ".join(comp_names)
+                else:
+                    name = f"{comp_names[0]} ... {comp_names[-1]} ({size} components)"
+
+                # Calculate initial score based on component quality
+                avg_score = sum(c.usefulness_score for c in sub_components) / len(sub_components)
+
+                config = ComponentConfiguration(
+                    name=name,
+                    component_ids=comp_ids,
+                    description=f"Extracted from {engine_name}",
+                    source_engine_id=engine.engine_id,
+                    config_score=avg_score,
+                    validated=True  # From a known working engine
+                )
+                configs.append(config)
+
+        return configs
+
+    def save_configurations(self, configs: list['ComponentConfiguration']) -> int:
+        """Save configurations to database, skipping duplicates."""
+        saved = 0
+        for config in configs:
+            existing = self.db.get_configuration(config.config_id)
+            if not existing:
+                self.db.add_configuration(config)
+                saved += 1
+        return saved
+
+    def find_matching_configurations(
+        self,
+        components: list['Component'],
+        min_match_ratio: float = 0.5
+    ) -> list[tuple['ComponentConfiguration', float]]:
+        """
+        Find configurations that match a subset of the given components.
+
+        Args:
+            components: List of components to match against
+            min_match_ratio: Minimum ratio of config components that must match
+
+        Returns:
+            List of (configuration, match_ratio) tuples, sorted by match ratio
+        """
+        component_ids = {c.component_id for c in components}
+        all_configs = self.db.find_configurations(validated=True)
+
+        matches = []
+        for config in all_configs:
+            config_ids = set(config.component_ids)
+            overlap = len(config_ids & component_ids)
+            match_ratio = overlap / len(config_ids) if config_ids else 0
+
+            if match_ratio >= min_match_ratio:
+                matches.append((config, match_ratio))
+
+        # Sort by match ratio descending
+        matches.sort(key=lambda x: x[1], reverse=True)
+        return matches

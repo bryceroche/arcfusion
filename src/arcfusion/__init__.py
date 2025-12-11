@@ -13,6 +13,7 @@ from .db import (
     ProcessedPaper,
     BenchmarkResult,
     DreamedEngine,
+    ComponentConfiguration,
 )
 from .composer import EngineComposer
 from .decomposer import PaperDecomposer
@@ -38,6 +39,7 @@ __all__ = [
     "Component",
     "Engine",
     "ComponentRelationship",
+    "ComponentConfiguration",
     "ProcessedPaper",
     "BenchmarkResult",
     "DreamedEngine",

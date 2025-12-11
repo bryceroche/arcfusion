@@ -277,6 +277,81 @@ def cmd_dedup(args):
             print(f"Database stats: {db.stats()}")
 
 
+def cmd_config(args):
+    """Manage component configurations."""
+    with ArcFusionDB(args.db) as db:
+        composer = EngineComposer(db)
+
+        if args.action == "list":
+            configs = db.find_configurations(
+                min_score=args.min_score,
+                validated=True if args.validated else None
+            )
+            if not configs:
+                print("No configurations found.")
+                return
+
+            print(f"Configurations ({len(configs)}):")
+            for config in configs:
+                status = "✓" if config.validated else " "
+                print(f"  [{status}] {config.name}")
+                print(f"      Score: {config.config_score:.2f}, Used: {config.usage_count}x")
+                print(f"      Components: {len(config.component_ids)}")
+
+        elif args.action == "extract":
+            if not args.engine:
+                print("[ERROR] --engine required for extract action")
+                sys.exit(1)
+
+            configs = composer.extract_configurations_from_engine(
+                args.engine,
+                min_size=args.min_size,
+                max_size=args.max_size
+            )
+
+            if not configs:
+                print(f"No configurations extracted from '{args.engine}'")
+                return
+
+            print(f"Extracted {len(configs)} configurations from '{args.engine}':")
+            for config in configs[:10]:  # Show first 10
+                print(f"  - {config.name} (score: {config.config_score:.2f})")
+
+            if len(configs) > 10:
+                print(f"  ... and {len(configs) - 10} more")
+
+            if not args.dry_run:
+                saved = composer.save_configurations(configs)
+                print(f"\nSaved {saved} new configurations to database.")
+            else:
+                print("\n[DRY RUN] Use --save to persist configurations.")
+
+        elif args.action == "show":
+            if not args.config_id:
+                print("[ERROR] --id required for show action")
+                sys.exit(1)
+
+            config = db.get_configuration(args.config_id)
+            if not config:
+                print(f"Configuration '{args.config_id}' not found.")
+                sys.exit(1)
+
+            print(f"Configuration: {config.name}")
+            print(f"  ID: {config.config_id}")
+            print(f"  Score: {config.config_score:.2f}")
+            print(f"  Usage count: {config.usage_count}")
+            print(f"  Validated: {'Yes' if config.validated else 'No'}")
+            print(f"  Source engine: {config.source_engine_id or 'N/A'}")
+            print(f"  Description: {config.description}")
+            print(f"\nComponents ({len(config.component_ids)}):")
+            for cid in config.component_ids:
+                comp = db.get_component(cid)
+                if comp:
+                    print(f"    - {comp.name}")
+                else:
+                    print(f"    - [Unknown: {cid}]")
+
+
 def cmd_generate(args):
     """Generate PyTorch code from a dreamed architecture."""
     with ArcFusionDB(args.db) as db:
@@ -423,6 +498,25 @@ Examples:
     gen_parser.add_argument("--engine1", help="First parent engine (required for crossover)")
     gen_parser.add_argument("--engine2", help="Second parent engine (required for crossover)")
 
+    # config (component configurations management)
+    config_parser = subparsers.add_parser(
+        "config",
+        help="Manage component configurations",
+        description="Extract, list, and manage proven component configurations (sub-architectures)."
+    )
+    config_parser.add_argument(
+        "action",
+        choices=["list", "extract", "show"],
+        help="Action: list (show all), extract (from engine), show (details)"
+    )
+    config_parser.add_argument("--engine", "-e", help="Engine name for extract action")
+    config_parser.add_argument("--id", dest="config_id", help="Configuration ID for show action")
+    config_parser.add_argument("--min-size", type=int, default=2, help="Min components in config (default: 2)")
+    config_parser.add_argument("--max-size", type=int, help="Max components in config")
+    config_parser.add_argument("--min-score", type=float, help="Min score for list filter")
+    config_parser.add_argument("--validated", action="store_true", help="Only show validated configs")
+    config_parser.add_argument("--save", dest="dry_run", action="store_false", default=True, help="Save extracted configs (default is dry-run)")
+
     args = parser.parse_args()
 
     if args.command == "init":
@@ -443,6 +537,8 @@ Examples:
         cmd_dedup(args)
     elif args.command == "generate":
         cmd_generate(args)
+    elif args.command == "config":
+        cmd_config(args)
     else:
         parser.print_help()
         sys.exit(1)
