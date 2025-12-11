@@ -412,12 +412,11 @@ class ArcFusionDB:
         if not row:
             return None
 
-        comp_ids = [
-            r['component_id'] for r in self.conn.execute(
-                "SELECT component_id FROM engine_components WHERE engine_id = ? ORDER BY position",
-                (engine_id,)
-            ).fetchall()
-        ]
+        rows = self.conn.execute(
+            "SELECT component_id FROM engine_components WHERE engine_id = ? ORDER BY position",
+            (engine_id,)
+        ).fetchall() or []
+        comp_ids = [r['component_id'] for r in rows]
 
         return Engine(
             engine_id=row['engine_id'],

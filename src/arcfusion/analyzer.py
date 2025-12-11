@@ -21,6 +21,12 @@ except ImportError:
 
 from .db import ArcFusionDB, Component, Engine, ComponentRelationship
 
+# LLM analysis constants
+MAX_CONTENT_LENGTH = 15000  # Max characters to pass to LLM
+MAX_COMPLETION_TOKENS = 8192  # Max tokens for LLM response
+DEFAULT_MIN_CONFIDENCE = 0.7  # Minimum confidence to include component
+DEFAULT_RELATIONSHIP_SCORE = 0.5  # Fallback score for invalid relationship scores
+
 
 @dataclass
 class AnalyzedComponent:
@@ -149,6 +155,22 @@ class PaperAnalyzer:
 
         self.client = anthropic.Anthropic(api_key=self.api_key)
 
+    def _extract_json_from_response(self, text: str) -> Optional[str]:
+        """Extract JSON from markdown code block or raw text."""
+        if "```json" in text:
+            start = text.find("```json") + 7
+            end = text.find("```", start)
+            if end == -1:
+                return None
+            return text[start:end].strip()
+        elif "```" in text:
+            start = text.find("```") + 3
+            end = text.find("```", start)
+            if end == -1:
+                return None
+            return text[start:end].strip()
+        return text.strip()
+
     def analyze_paper(
         self,
         title: str,
@@ -176,14 +198,13 @@ class PaperAnalyzer:
         prompt = ANALYSIS_PROMPT.format(
             title=title,
             paper_id=paper_id,
-            content=content[:15000]  # Limit content length
+            content=content[:MAX_CONTENT_LENGTH]
         )
 
         try:
-            max_tokens = 8192
             response = self.client.messages.create(
                 model=model,
-                max_tokens=max_tokens,
+                max_tokens=MAX_COMPLETION_TOKENS,
                 messages=[{"role": "user", "content": prompt}]
             )
 
@@ -195,25 +216,14 @@ class PaperAnalyzer:
 
             response_text = response.content[0].text
 
-            # Find JSON block (handle markdown code blocks)
-            if "```json" in response_text:
-                json_start = response_text.find("```json") + 7
-                json_end = response_text.find("```", json_start)
-                if json_end == -1:
-                    if verbose:
-                        print("  [ERROR] Malformed JSON code block (missing closing ```)")
-                    return None
-                response_text = response_text[json_start:json_end]
-            elif "```" in response_text:
-                json_start = response_text.find("```") + 3
-                json_end = response_text.find("```", json_start)
-                if json_end == -1:
-                    if verbose:
-                        print("  [ERROR] Malformed code block (missing closing ```)")
-                    return None
-                response_text = response_text[json_start:json_end]
+            # Extract JSON from response (handles markdown code blocks)
+            json_text = self._extract_json_from_response(response_text)
+            if json_text is None:
+                if verbose:
+                    print("  [ERROR] Malformed code block (missing closing ```)")
+                return None
 
-            data = json.loads(response_text.strip())
+            data = json.loads(json_text)
 
             # Parse into structured result
             novel_components = []
@@ -275,7 +285,7 @@ class PaperAnalyzer:
         content: str,
         paper_id: str = "",
         paper_url: str = "",
-        min_confidence: float = 0.7,
+        min_confidence: float = DEFAULT_MIN_CONFIDENCE,
         verbose: bool = True
     ) -> tuple[Optional[Engine], list[Component]]:
         """
@@ -386,8 +396,8 @@ class PaperAnalyzer:
             # Validate score is in valid range
             if not isinstance(score, (int, float)) or score < 0 or score > 1:
                 if verbose:
-                    print(f"  [WARN] Invalid relationship score {score} for {comp1_name} <-> {comp2_name}, using 0.5")
-                score = 0.5
+                    print(f"  [WARN] Invalid relationship score {score} for {comp1_name} <-> {comp2_name}, using {DEFAULT_RELATIONSHIP_SCORE}")
+                score = DEFAULT_RELATIONSHIP_SCORE
 
             relationship = ComponentRelationship(
                 component1_id=comp1.component_id,
