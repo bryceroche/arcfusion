@@ -26,6 +26,23 @@ class PaperDecomposer:
         "linear_attention": ["linear attention", "rwkv", "aft"],
     }
 
+    # Map category names to search patterns for finding existing components
+    CATEGORY_SEARCH_PATTERNS = {
+        "attention": ["Attention", "attention", "MHA"],
+        "normalization": ["Norm", "norm", "RMS"],
+        "feedforward": ["Feed", "FFN", "MLP"],
+        "embedding": ["Embed", "Position", "Token"],
+        "convolution": ["Conv"],
+        "pooling": ["Pool"],
+        "activation": ["Activation", "GELU", "ReLU"],
+        "dropout": ["Dropout"],
+        "residual": ["Residual", "Skip"],
+        "gating": ["Gate", "GLU", "MoE"],
+        "ssm": ["SSM", "Mamba", "State"],
+        "retention": ["Retention", "RetNet"],
+        "linear_attention": ["Linear", "RWKV"],
+    }
+
     def __init__(self, db: ArcFusionDB):
         self.db = db
 
@@ -70,9 +87,17 @@ class PaperDecomposer:
         comp_ids = []
 
         for ext in extracted:
-            existing = self.db.find_components(ext["category"])
+            # Search for existing components using category-specific patterns
+            existing = None
+            search_patterns = self.CATEGORY_SEARCH_PATTERNS.get(ext["category"], [ext["category"]])
+            for pattern in search_patterns:
+                matches = self.db.find_components(pattern)
+                if matches:
+                    existing = matches[0]
+                    break
+
             if existing:
-                comp = existing[0]
+                comp = existing
             else:
                 comp = Component(
                     name=ext["category"].title(),

@@ -318,39 +318,54 @@ class EngineComposer:
         e2 = self.db.get_engine_by_name(engine2_name)
 
         if not e1 or not e2:
+            # Return empty with warning - caller should handle
             return []
 
         # Get all components from both engines
         comps1 = [self.db.get_component(cid) for cid in e1.component_ids if self.db.get_component(cid)]
         comps2 = [self.db.get_component(cid) for cid in e2.component_ids if self.db.get_component(cid)]
 
+        all_parent_comps = comps1 + comps2
+        if not all_parent_comps:
+            return []
+
         # Group by category
         by_category = {}
-        for comp in comps1 + comps2:
+        for comp in all_parent_comps:
             cat = get_component_category(comp)
             if cat not in by_category:
                 by_category[cat] = []
             if comp not in by_category[cat]:
                 by_category[cat].append(comp)
 
-        # For each category, randomly pick from available components
+        # For each category that exists, randomly pick from available components
         selected = []
         for cat in CATEGORY_ORDER.keys():
             if cat in by_category and by_category[cat]:
-                # Take 1-2 components per category randomly
-                n = min(len(by_category[cat]), random.randint(1, 2))
-                selected.extend(random.sample(by_category[cat], n))
+                # Take 1 component per category for cleaner architectures
+                selected.append(random.choice(by_category[cat]))
 
-        # Verify interface compatibility in sequence
+        # If we got nothing from category iteration, take top components from both parents
+        if not selected:
+            # Fallback: take highest-scoring components from each parent
+            sorted_comps = sorted(all_parent_comps, key=lambda c: c.usefulness_score, reverse=True)
+            selected = sorted_comps[:min(6, len(sorted_comps))]
+
+        # Sort by architecture order
+        selected = self.sort_by_architecture_order(selected)
+
+        # Try to filter by interface compatibility, but keep originals if too aggressive
         if len(selected) > 1:
-            selected = self.sort_by_architecture_order(selected)
-            # Filter out components that don't connect well
             final = [selected[0]]
             for i in range(1, len(selected)):
                 compatible, score = interfaces_compatible(final[-1], selected[i])
-                if compatible:
+                # Accept if compatible OR if score is reasonable (lenient)
+                if compatible or score >= 0.3:
                     final.append(selected[i])
-            selected = final
+
+            # Only use filtered result if it kept at least half the components
+            if len(final) >= len(selected) // 2 and len(final) >= 2:
+                selected = final
 
         return selected
 
@@ -396,7 +411,12 @@ class EngineComposer:
     def dream(self, strategy: str = "greedy", **kwargs) -> tuple[list[Component], float]:
         """
         Dream up a new engine configuration.
-        Returns (components, estimated_score)
+
+        Returns:
+            (components, estimated_score) - If components is empty, composition failed.
+
+        Raises:
+            ValueError: If strategy is unknown or required kwargs are missing.
         """
         strategies = {
             "greedy": self.greedy_compose,
@@ -408,10 +428,19 @@ class EngineComposer:
         if strategy not in strategies:
             raise ValueError(f"Unknown strategy: {strategy}. Choose from {list(strategies.keys())}")
 
+        # Validate required kwargs for each strategy
+        if strategy == "crossover":
+            if not kwargs.get("engine1_name") or not kwargs.get("engine2_name"):
+                raise ValueError("crossover strategy requires engine1_name and engine2_name")
+        if strategy == "mutate":
+            if not kwargs.get("engine_name"):
+                raise ValueError("mutate strategy requires engine_name")
+
         components = strategies[strategy](**kwargs)
 
         if not components:
-            return [], 0.0
+            # Return empty with score of -1 to indicate failure (vs 0.0 for very low score)
+            return [], -1.0
 
         # Base score from component quality
         base_score = sum(c.usefulness_score for c in components) / len(components)
