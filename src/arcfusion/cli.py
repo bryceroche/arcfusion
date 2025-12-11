@@ -6,7 +6,7 @@ import argparse
 import os
 import sys
 from . import __version__
-from .db import ArcFusionDB
+from .db import ArcFusionDB, BenchmarkResult
 from .composer import EngineComposer
 from .seeds import seed_transformers, seed_modern_architectures
 from .fetcher import ArxivFetcher
@@ -352,6 +352,143 @@ def cmd_config(args: argparse.Namespace) -> None:
                     print(f"    - [Unknown: {cid}]")
 
 
+def cmd_benchmark(args: argparse.Namespace) -> None:
+    """Manage benchmark results."""
+    with ArcFusionDB(args.db) as db:
+        if args.action == "add":
+            # Find the engine
+            engine = db.get_engine_by_name(args.engine)
+            if not engine:
+                print(f"[ERROR] Engine '{args.engine}' not found")
+                sys.exit(1)
+
+            # Parse parameters if provided
+            parameters = {}
+            if args.params:
+                for param in args.params:
+                    if "=" in param:
+                        key, value = param.split("=", 1)
+                        # Try to convert to number
+                        try:
+                            value = float(value)
+                            if value.is_integer():
+                                value = int(value)
+                        except ValueError:
+                            pass
+                        parameters[key] = value
+
+            result = BenchmarkResult(
+                engine_id=engine.engine_id,
+                benchmark_name=args.name,
+                score=args.score,
+                parameters=parameters,
+                notes=args.notes or ""
+            )
+            benchmark_id = db.add_benchmark(result)
+            print(f"Added benchmark result: {benchmark_id}")
+            print(f"  Engine: {args.engine}")
+            print(f"  Benchmark: {args.name}")
+            print(f"  Score: {args.score}")
+            if parameters:
+                print(f"  Parameters: {parameters}")
+
+        elif args.action == "leaderboard":
+            if not args.name:
+                print("[ERROR] --name required for leaderboard action")
+                sys.exit(1)
+
+            higher_better = not args.lower_better
+            results = db.get_benchmark_leaderboard(
+                args.name,
+                higher_is_better=higher_better,
+                limit=args.limit
+            )
+
+            if not results:
+                print(f"No results for benchmark '{args.name}'")
+                return
+
+            direction = "↑" if higher_better else "↓"
+            print(f"Leaderboard: {args.name} ({direction} higher is {'better' if higher_better else 'worse'})")
+            print("-" * 50)
+            for i, (engine, score) in enumerate(results, 1):
+                print(f"  {i:2}. {engine.name:<30} {score:.4f}")
+
+        elif args.action == "show":
+            if not args.engine:
+                print("[ERROR] --engine required for show action")
+                sys.exit(1)
+
+            engine = db.get_engine_by_name(args.engine)
+            if not engine:
+                print(f"[ERROR] Engine '{args.engine}' not found")
+                sys.exit(1)
+
+            results = db.get_engine_benchmarks(engine.engine_id)
+            if not results:
+                print(f"No benchmark results for '{args.engine}'")
+                return
+
+            print(f"Benchmark results for: {args.engine}")
+            print("-" * 50)
+            for r in results:
+                print(f"  {r.benchmark_name}: {r.score:.4f}")
+                if r.parameters:
+                    print(f"    Params: {r.parameters}")
+                if r.notes:
+                    print(f"    Notes: {r.notes}")
+
+        elif args.action == "compare":
+            if not args.engine or not args.engine2:
+                print("[ERROR] --engine and --engine2 required for compare action")
+                sys.exit(1)
+
+            engine1 = db.get_engine_by_name(args.engine)
+            engine2 = db.get_engine_by_name(args.engine2)
+
+            if not engine1:
+                print(f"[ERROR] Engine '{args.engine}' not found")
+                sys.exit(1)
+            if not engine2:
+                print(f"[ERROR] Engine '{args.engine2}' not found")
+                sys.exit(1)
+
+            comparison = db.compare_engines([engine1.engine_id, engine2.engine_id])
+            if not comparison:
+                print(f"No benchmarks found for these engines")
+                return
+
+            print(f"Comparison: {args.engine} vs {args.engine2}")
+            print("-" * 60)
+            print(f"  {'Benchmark':<25} {args.engine:<15} {args.engine2:<15} {'Diff':>10}")
+            print("-" * 60)
+            for bench_name in sorted(comparison.keys()):
+                scores = comparison[bench_name]
+                score1 = scores.get(engine1.engine_id)
+                score2 = scores.get(engine2.engine_id)
+                s1_str = f"{score1:.4f}" if score1 is not None else "N/A"
+                s2_str = f"{score2:.4f}" if score2 is not None else "N/A"
+                if score1 is not None and score2 is not None:
+                    diff = score1 - score2
+                    diff_str = f"{diff:+.4f}"
+                else:
+                    diff_str = ""
+                print(f"  {bench_name:<25} {s1_str:<15} {s2_str:<15} {diff_str:>10}")
+
+        elif args.action == "list":
+            benchmarks = db.list_benchmarks()
+            if not benchmarks:
+                print("No benchmarks recorded yet.")
+                return
+
+            print(f"Benchmark types ({len(benchmarks)}):")
+            print("-" * 50)
+            for b in benchmarks:
+                print(f"  {b['benchmark_name']}")
+                print(f"    Engines: {b['num_engines']}, Avg: {b['avg_score']:.4f}")
+                print(f"    Range: {b['min_score']:.4f} - {b['max_score']:.4f}")
+
+
 def cmd_generate(args: argparse.Namespace) -> None:
     """Generate PyTorch code from a dreamed architecture."""
     with ArcFusionDB(args.db) as db:
@@ -517,6 +654,26 @@ Examples:
     config_parser.add_argument("--validated", action="store_true", help="Only show validated configs")
     config_parser.add_argument("--save", dest="dry_run", action="store_false", default=True, help="Save extracted configs (default is dry-run)")
 
+    # benchmark (benchmark results management)
+    bench_parser = subparsers.add_parser(
+        "benchmark",
+        help="Manage benchmark results",
+        description="Add, view, and compare benchmark results for engines."
+    )
+    bench_parser.add_argument(
+        "action",
+        choices=["add", "list", "leaderboard", "show", "compare"],
+        help="Action: add (record result), list (all benchmarks), leaderboard (top engines), show (engine results), compare (two engines)"
+    )
+    bench_parser.add_argument("--engine", "-e", help="Engine name")
+    bench_parser.add_argument("--engine2", help="Second engine for compare action")
+    bench_parser.add_argument("--name", "-n", help="Benchmark name (e.g., 'perplexity', 'glue', 'mmlu')")
+    bench_parser.add_argument("--score", "-s", type=float, help="Benchmark score")
+    bench_parser.add_argument("--params", nargs="*", help="Parameters as key=value pairs (e.g., layers=6 d_model=512)")
+    bench_parser.add_argument("--notes", help="Notes about the benchmark run")
+    bench_parser.add_argument("--limit", type=int, default=20, help="Max results for leaderboard (default: 20)")
+    bench_parser.add_argument("--lower-better", action="store_true", help="Lower score is better (e.g., perplexity)")
+
     args = parser.parse_args()
 
     if args.command == "init":
@@ -539,6 +696,8 @@ Examples:
         cmd_generate(args)
     elif args.command == "config":
         cmd_config(args)
+    elif args.command == "benchmark":
+        cmd_benchmark(args)
     else:
         parser.print_help()
         sys.exit(1)
