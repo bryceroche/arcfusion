@@ -356,6 +356,11 @@ def cmd_benchmark(args: argparse.Namespace) -> None:
     """Manage benchmark results."""
     with ArcFusionDB(args.db) as db:
         if args.action == "add":
+            # Validate required arguments
+            if not args.engine or not args.name or args.score is None:
+                print("[ERROR] --engine, --name, and --score required for add action")
+                sys.exit(1)
+
             # Find the engine
             engine = db.get_engine_by_name(args.engine)
             if not engine:
@@ -410,7 +415,7 @@ def cmd_benchmark(args: argparse.Namespace) -> None:
 
             direction = "↑" if higher_better else "↓"
             print(f"Leaderboard: {args.name} ({direction} higher is {'better' if higher_better else 'worse'})")
-            print("-" * 50)
+            print("-" * 60)
             for i, (engine, score) in enumerate(results, 1):
                 print(f"  {i:2}. {engine.name:<30} {score:.4f}")
 
@@ -430,7 +435,7 @@ def cmd_benchmark(args: argparse.Namespace) -> None:
                 return
 
             print(f"Benchmark results for: {args.engine}")
-            print("-" * 50)
+            print("-" * 60)
             for r in results:
                 print(f"  {r.benchmark_name}: {r.score:.4f}")
                 if r.parameters:
@@ -441,6 +446,10 @@ def cmd_benchmark(args: argparse.Namespace) -> None:
         elif args.action == "compare":
             if not args.engine or not args.engine2:
                 print("[ERROR] --engine and --engine2 required for compare action")
+                sys.exit(1)
+
+            if args.engine.lower() == args.engine2.lower():
+                print("[ERROR] Cannot compare an engine with itself")
                 sys.exit(1)
 
             engine1 = db.get_engine_by_name(args.engine)
@@ -482,7 +491,7 @@ def cmd_benchmark(args: argparse.Namespace) -> None:
                 return
 
             print(f"Benchmark types ({len(benchmarks)}):")
-            print("-" * 50)
+            print("-" * 60)
             for b in benchmarks:
                 print(f"  {b['benchmark_name']}")
                 print(f"    Engines: {b['num_engines']}, Avg: {b['avg_score']:.4f}")
