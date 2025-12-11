@@ -313,13 +313,19 @@ class EngineComposer:
         return self.sort_by_architecture_order(engine)
 
     def crossover(self, engine1_name: str, engine2_name: str) -> list[Component]:
-        """Create new engine by combining components from two parents with interface awareness."""
+        """
+        Create new engine by combining components from two parents with interface awareness.
+
+        Raises:
+            ValueError: If either engine is not found in the database.
+        """
         e1 = self.db.get_engine_by_name(engine1_name)
         e2 = self.db.get_engine_by_name(engine2_name)
 
-        if not e1 or not e2:
-            # Return empty with warning - caller should handle
-            return []
+        if not e1:
+            raise ValueError(f"Engine not found: '{engine1_name}'")
+        if not e2:
+            raise ValueError(f"Engine not found: '{engine2_name}'")
 
         # Get all components from both engines
         comps1 = [self.db.get_component(cid) for cid in e1.component_ids if self.db.get_component(cid)]
@@ -370,10 +376,15 @@ class EngineComposer:
         return selected
 
     def mutate(self, engine_name: str, mutation_rate: float = 0.2) -> list[Component]:
-        """Mutate an engine by swapping components with interface-compatible alternatives."""
+        """
+        Mutate an engine by swapping components with interface-compatible alternatives.
+
+        Raises:
+            ValueError: If engine is not found in the database.
+        """
         engine = self.db.get_engine_by_name(engine_name)
         if not engine:
-            return []
+            raise ValueError(f"Engine not found: '{engine_name}'")
 
         result = []
         for cid in engine.component_ids:

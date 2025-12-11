@@ -12,10 +12,14 @@ from .db import Component
 from .composer import get_component_category
 
 
+def _strip_parentheticals(name: str) -> str:
+    """Remove parenthetical content from a name, e.g., 'BERT (Bidirectional)' -> 'BERT'."""
+    return re.sub(r'\([^)]*\)', '', name)
+
+
 def sanitize_class_name(name: str) -> str:
     """Convert component name to valid Python class name."""
-    # Remove parenthetical content
-    name = re.sub(r'\([^)]*\)', '', name)
+    name = _strip_parentheticals(name)
     # Remove special characters, keep alphanumeric
     name = re.sub(r'[^a-zA-Z0-9]', '', name)
     # Ensure starts with letter
@@ -26,8 +30,7 @@ def sanitize_class_name(name: str) -> str:
 
 def sanitize_var_name(name: str) -> str:
     """Convert component name to valid Python variable name."""
-    # Remove parenthetical content
-    name = re.sub(r'\([^)]*\)', '', name)
+    name = _strip_parentheticals(name)
     # Convert to snake_case
     name = re.sub(r'([A-Z])', r'_\1', name).lower()
     name = re.sub(r'[^a-z0-9_]', '_', name)

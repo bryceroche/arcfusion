@@ -232,13 +232,13 @@ class TestCrossover:
 
     def test_crossover_invalid_engine(self, db):
         composer = EngineComposer(db)
-        components = composer.crossover("Transformer", "NonexistentEngine")
-        assert components == []
+        with pytest.raises(ValueError, match="Engine not found: 'NonexistentEngine'"):
+            composer.crossover("Transformer", "NonexistentEngine")
 
     def test_crossover_both_invalid(self, db):
         composer = EngineComposer(db)
-        components = composer.crossover("Fake1", "Fake2")
-        assert components == []
+        with pytest.raises(ValueError, match="Engine not found: 'Fake1'"):
+            composer.crossover("Fake1", "Fake2")
 
 
 class TestMutate:
@@ -266,8 +266,8 @@ class TestMutate:
 
     def test_mutate_invalid_engine(self, db):
         composer = EngineComposer(db)
-        components = composer.mutate("NonexistentEngine")
-        assert components == []
+        with pytest.raises(ValueError, match="Engine not found: 'NonexistentEngine'"):
+            composer.mutate("NonexistentEngine")
 
 
 class TestDream:
@@ -312,11 +312,10 @@ class TestDream:
         with pytest.raises(ValueError, match="mutate strategy requires"):
             composer.dream("mutate")
 
-    def test_dream_failure_returns_negative_score(self, db):
+    def test_dream_failure_raises_for_invalid_engine(self, db):
         composer = EngineComposer(db)
-        components, score = composer.dream("crossover", engine1_name="Fake1", engine2_name="Fake2")
-        assert components == []
-        assert score == -1.0
+        with pytest.raises(ValueError, match="Engine not found"):
+            composer.dream("crossover", engine1_name="Fake1", engine2_name="Fake2")
 
 
 class TestCompatibilityScore:

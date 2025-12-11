@@ -334,6 +334,20 @@ def cmd_generate(args):
 
 
 def main():
+    """
+    ArcFusion CLI entry point.
+
+    Provides commands for managing ML architecture components:
+    - init: Seed the database with Transformer and modern architecture components
+    - stats: Display database statistics
+    - list: List components, engines, papers, or benchmarks
+    - show: Display details about a component or engine
+    - dream: Compose new architectures using various strategies
+    - generate: Generate runnable PyTorch code from dreamed architectures
+    - ingest: Import papers from arXiv
+    - analyze: Deep LLM-powered component extraction (requires ANTHROPIC_API_KEY)
+    - dedup: Find and merge duplicate components
+    """
     parser = argparse.ArgumentParser(
         description="ArcFusion - ML Architecture Component Database",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -373,15 +387,25 @@ Examples:
     show_parser.add_argument("name", help="Component or engine name")
 
     # dream
-    dream_parser = subparsers.add_parser("dream", help="Dream up new architecture")
-    dream_parser.add_argument("strategy", choices=["greedy", "random", "mutate", "crossover"])
-    dream_parser.add_argument("--start", help="Starting component (greedy)")
-    dream_parser.add_argument("--steps", type=int, default=5, help="Steps (random)")
-    dream_parser.add_argument("--temperature", type=float, default=1.0, help="Temperature (random)")
-    dream_parser.add_argument("--engine", help="Engine to mutate")
-    dream_parser.add_argument("--rate", type=float, default=0.2, help="Mutation rate")
-    dream_parser.add_argument("--engine1", help="First engine (crossover)")
-    dream_parser.add_argument("--engine2", help="Second engine (crossover)")
+    dream_parser = subparsers.add_parser(
+        "dream",
+        help="Dream up new architecture",
+        description="Compose a new architecture using one of four strategies: "
+                    "greedy (pick best compatible components), random (weighted sampling), "
+                    "mutate (modify existing engine), crossover (combine two engines)."
+    )
+    dream_parser.add_argument(
+        "strategy",
+        choices=["greedy", "random", "mutate", "crossover"],
+        help="Composition strategy"
+    )
+    dream_parser.add_argument("--start", help="Starting component name for greedy strategy")
+    dream_parser.add_argument("--steps", type=int, default=5, help="Number of components for random strategy (default: 5)")
+    dream_parser.add_argument("--temperature", type=float, default=1.0, help="Sampling temperature for random strategy (default: 1.0)")
+    dream_parser.add_argument("--engine", help="Engine name to mutate (required for mutate strategy)")
+    dream_parser.add_argument("--rate", type=float, default=0.2, help="Mutation rate 0-1 (default: 0.2)")
+    dream_parser.add_argument("--engine1", help="First parent engine (required for crossover)")
+    dream_parser.add_argument("--engine2", help="Second parent engine (required for crossover)")
 
     # ingest
     ingest_parser = subparsers.add_parser("ingest", help="Ingest papers from arXiv")
@@ -401,17 +425,27 @@ Examples:
     dedup_parser.add_argument("--apply", dest="dry_run", action="store_false", default=True, help="Apply changes (default is dry-run)")
 
     # generate (code generation from dream)
-    gen_parser = subparsers.add_parser("generate", help="Generate PyTorch code from dreamed architecture")
-    gen_parser.add_argument("strategy", choices=["greedy", "random", "mutate", "crossover"])
-    gen_parser.add_argument("--name", "-n", default="DreamedArchitecture", help="Class name for generated architecture")
-    gen_parser.add_argument("--output", "-o", help="Output file path (prints to stdout if not specified)")
-    gen_parser.add_argument("--start", help="Starting component (greedy)")
-    gen_parser.add_argument("--steps", type=int, default=6, help="Number of components (random)")
-    gen_parser.add_argument("--temperature", type=float, default=1.0, help="Temperature (random)")
-    gen_parser.add_argument("--engine", help="Engine to mutate")
-    gen_parser.add_argument("--rate", type=float, default=0.2, help="Mutation rate")
-    gen_parser.add_argument("--engine1", help="First engine (crossover)")
-    gen_parser.add_argument("--engine2", help="Second engine (crossover)")
+    gen_parser = subparsers.add_parser(
+        "generate",
+        help="Generate PyTorch code from dreamed architecture",
+        description="Dream an architecture and generate runnable PyTorch nn.Module code. "
+                    "The generated code includes component classes, the main architecture class, "
+                    "and example usage."
+    )
+    gen_parser.add_argument(
+        "strategy",
+        choices=["greedy", "random", "mutate", "crossover"],
+        help="Composition strategy for dreaming"
+    )
+    gen_parser.add_argument("--name", "-n", default="DreamedArchitecture", help="Class name for generated architecture (default: DreamedArchitecture)")
+    gen_parser.add_argument("--output", "-o", help="Output .py file path (prints to stdout if not specified)")
+    gen_parser.add_argument("--start", help="Starting component name for greedy strategy")
+    gen_parser.add_argument("--steps", type=int, default=6, help="Number of components for random strategy (default: 6)")
+    gen_parser.add_argument("--temperature", type=float, default=1.0, help="Sampling temperature for random strategy (default: 1.0)")
+    gen_parser.add_argument("--engine", help="Engine name to mutate (required for mutate strategy)")
+    gen_parser.add_argument("--rate", type=float, default=0.2, help="Mutation rate 0-1 (default: 0.2)")
+    gen_parser.add_argument("--engine1", help="First parent engine (required for crossover)")
+    gen_parser.add_argument("--engine2", help="Second parent engine (required for crossover)")
 
     args = parser.parse_args()
 

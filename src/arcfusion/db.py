@@ -340,11 +340,11 @@ class ArcFusionDB:
 
     def find_components(
         self,
-        name_pattern: str = None,
-        min_score: float = None,
-        time_complexity: str = None,
-        is_parallelizable: bool = None,
-        is_causal: bool = None
+        name_pattern: Optional[str] = None,
+        min_score: Optional[float] = None,
+        time_complexity: Optional[str] = None,
+        is_parallelizable: Optional[bool] = None,
+        is_causal: Optional[bool] = None
     ) -> list[Component]:
         """Search for components with optional filters"""
         query = "SELECT * FROM components WHERE 1=1"
@@ -531,7 +531,7 @@ class ArcFusionDB:
             )
         return None
 
-    def list_processed_papers(self, status: str = None, limit: int = 100) -> list[ProcessedPaper]:
+    def list_processed_papers(self, status: Optional[str] = None, limit: int = 100) -> list[ProcessedPaper]:
         """List processed papers"""
         query = "SELECT * FROM processed_papers"
         params = []
@@ -692,7 +692,7 @@ class ArcFusionDB:
             )
         return None
 
-    def list_dreamed_engines(self, strategy: str = None, validated: bool = None, limit: int = 100) -> list[DreamedEngine]:
+    def list_dreamed_engines(self, strategy: Optional[str] = None, validated: Optional[bool] = None, limit: int = 100) -> list[DreamedEngine]:
         """List dreamed engines with optional filters"""
         query = "SELECT * FROM dreamed_engines WHERE 1=1"
         params = []
