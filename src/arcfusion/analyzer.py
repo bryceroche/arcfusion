@@ -331,21 +331,51 @@ class PaperAnalyzer:
             if verbose:
                 print(f"  Engine {engine.name} already exists")
 
-        # Add component relationships
-        for rel in result.component_relationships:
-            if len(rel) >= 3:
-                comp1_name, comp2_name, score = rel[0], rel[1], rel[2]
-                comp1 = existing.get(comp1_name.lower())
-                comp2 = existing.get(comp2_name.lower())
+        # Add component relationships (with validation)
+        relationships_added = 0
+        relationships_skipped = 0
 
-                if comp1 and comp2:
-                    relationship = ComponentRelationship(
-                        component1_id=comp1.component_id,
-                        component2_id=comp2.component_id,
-                        engine_id=engine.engine_id,
-                        c2c_score=score,
-                    )
-                    self.db.add_relationship(relationship)
+        for rel in result.component_relationships:
+            if len(rel) < 3:
+                if verbose:
+                    print(f"  [WARN] Invalid relationship format: {rel}")
+                relationships_skipped += 1
+                continue
+
+            comp1_name, comp2_name, score = rel[0], rel[1], rel[2]
+            comp1 = existing.get(comp1_name.lower())
+            comp2 = existing.get(comp2_name.lower())
+
+            # Validate both components exist before adding relationship
+            if not comp1:
+                if verbose:
+                    print(f"  [WARN] Skipping relationship: '{comp1_name}' not found (may have been skipped due to low confidence)")
+                relationships_skipped += 1
+                continue
+
+            if not comp2:
+                if verbose:
+                    print(f"  [WARN] Skipping relationship: '{comp2_name}' not found (may have been skipped due to low confidence)")
+                relationships_skipped += 1
+                continue
+
+            # Validate score is in valid range
+            if not isinstance(score, (int, float)) or score < 0 or score > 1:
+                if verbose:
+                    print(f"  [WARN] Invalid relationship score {score} for {comp1_name} <-> {comp2_name}, using 0.5")
+                score = 0.5
+
+            relationship = ComponentRelationship(
+                component1_id=comp1.component_id,
+                component2_id=comp2.component_id,
+                engine_id=engine.engine_id,
+                c2c_score=float(score),
+            )
+            self.db.add_relationship(relationship)
+            relationships_added += 1
+
+        if verbose and (relationships_added > 0 or relationships_skipped > 0):
+            print(f"  Relationships: {relationships_added} added, {relationships_skipped} skipped")
 
         return engine, new_components
 

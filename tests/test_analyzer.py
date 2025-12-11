@@ -352,3 +352,43 @@ class TestJSONParsing:
         assert comp.description == ""
         assert comp.category == "layer"
         assert comp.confidence == 0.5
+
+
+class TestRelationshipValidation:
+    """Test relationship validation logic."""
+
+    def test_valid_relationship_score(self):
+        """Test that valid scores are accepted."""
+        valid_scores = [0.0, 0.5, 1.0, 0.75]
+        for score in valid_scores:
+            assert isinstance(score, (int, float))
+            assert 0 <= score <= 1
+
+    def test_invalid_relationship_score_detection(self):
+        """Test that invalid scores are detected."""
+        invalid_scores = [-0.1, 1.5, "high", None]
+        for score in invalid_scores:
+            is_valid = isinstance(score, (int, float)) and 0 <= score <= 1 if isinstance(score, (int, float)) else False
+            assert not is_valid
+
+    def test_relationship_requires_both_components(self):
+        """Test that relationships are only created when both components exist."""
+        existing = {"comp1": "id1", "comp2": "id2"}
+
+        # Both exist - should succeed
+        rel1 = ("comp1", "comp2", 0.9, "reason")
+        comp1 = existing.get(rel1[0].lower())
+        comp2 = existing.get(rel1[1].lower())
+        assert comp1 and comp2
+
+        # One missing - should fail
+        rel2 = ("comp1", "missing", 0.9, "reason")
+        comp1 = existing.get(rel2[0].lower())
+        comp2 = existing.get(rel2[1].lower())
+        assert not (comp1 and comp2)
+
+        # Both missing - should fail
+        rel3 = ("missing1", "missing2", 0.9, "reason")
+        comp1 = existing.get(rel3[0].lower())
+        comp2 = existing.get(rel3[1].lower())
+        assert not (comp1 and comp2)

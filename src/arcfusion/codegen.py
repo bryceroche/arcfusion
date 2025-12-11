@@ -380,10 +380,28 @@ class GeneratedCode:
     num_components: int
     component_names: list[str]
 
-    def save(self, path: str):
-        """Save generated code to file."""
+    def save(self, path: str, validate: bool = True) -> bool:
+        """
+        Save generated code to file.
+
+        Args:
+            path: File path to save to
+            validate: If True, validate syntax before saving (default True)
+
+        Returns:
+            True if saved successfully, False if validation failed
+
+        Raises:
+            ValueError: If validation is enabled and code has syntax errors
+        """
+        if validate:
+            valid, error = self.validate_syntax()
+            if not valid:
+                raise ValueError(f"Cannot save invalid Python code: {error}")
+
         with open(path, 'w') as f:
             f.write(self.code)
+        return True
 
     def validate_syntax(self) -> tuple[bool, Optional[str]]:
         """Check if generated code has valid Python syntax."""

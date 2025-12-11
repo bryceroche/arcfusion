@@ -172,6 +172,39 @@ class Foo
         finally:
             os.unlink(path)
 
+    def test_save_validates_by_default(self):
+        """Test that save() validates syntax by default."""
+        invalid_code = "class Foo\n    pass"  # Missing colon
+        gc = GeneratedCode(code=invalid_code, name="Invalid", num_components=0, component_names=[])
+
+        with tempfile.NamedTemporaryFile(suffix='.py', delete=False) as f:
+            path = f.name
+
+        try:
+            with pytest.raises(ValueError, match="Cannot save invalid Python code"):
+                gc.save(path)
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def test_save_can_skip_validation(self):
+        """Test that validation can be skipped."""
+        invalid_code = "class Foo\n    pass"  # Missing colon
+        gc = GeneratedCode(code=invalid_code, name="Invalid", num_components=0, component_names=[])
+
+        with tempfile.NamedTemporaryFile(suffix='.py', delete=False) as f:
+            path = f.name
+
+        try:
+            # Should succeed with validate=False
+            result = gc.save(path, validate=False)
+            assert result is True
+            with open(path) as f:
+                content = f.read()
+            assert content == invalid_code
+        finally:
+            os.unlink(path)
+
 
 class TestCodeGeneratorIntegration:
     """Integration tests with database."""
