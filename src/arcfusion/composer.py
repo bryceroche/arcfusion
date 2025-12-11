@@ -31,6 +31,10 @@ RELATIONSHIP_WEIGHT = 0.4   # Weight for learned relationship scores
 CATEGORY_BONUS = 0.2        # Bonus for correct category ordering
 CATEGORY_CLOSE_BONUS = 0.1  # Bonus for nearly correct ordering
 
+# Configuration matching weights for dream scoring
+CONFIG_MATCH_WEIGHT = 0.15  # Weight for matching known-good configurations
+CONFIG_VALIDATED_BONUS = 0.05  # Extra bonus for validated configurations
+
 
 def normalize_shape(shape_str: str) -> str:
     """Normalize a shape string for comparison."""
@@ -430,6 +434,62 @@ class EngineComposer:
 
         return self.sort_by_architecture_order(result)
 
+    def _get_configuration_bonus(self, components: list[Component]) -> float:
+        """
+        Calculate bonus score based on matching known-good configurations.
+
+        Configurations that have been extracted from working engines provide
+        evidence that certain component combinations work well together.
+
+        Returns:
+            Bonus score (0.0 to CONFIG_MATCH_WEIGHT + CONFIG_VALIDATED_BONUS)
+        """
+        if len(components) < 2:
+            return 0.0
+
+        component_ids = [c.component_id for c in components]
+        component_set = set(component_ids)
+
+        # Find all configurations that overlap with our components
+        all_configs = self.db.find_configurations()
+        if not all_configs:
+            return 0.0
+
+        best_bonus = 0.0
+
+        for config in all_configs:
+            config_ids = set(config.component_ids)
+            overlap = len(config_ids & component_set)
+
+            if overlap < 2:
+                continue
+
+            # Check for contiguous sequence match (stronger signal)
+            config_id_list = config.component_ids
+            is_contiguous = False
+            for start in range(len(component_ids) - len(config_id_list) + 1):
+                if component_ids[start:start + len(config_id_list)] == config_id_list:
+                    is_contiguous = True
+                    break
+
+            # Calculate match strength
+            match_ratio = overlap / len(config_ids)
+
+            if is_contiguous:
+                # Full contiguous match - strong bonus
+                bonus = CONFIG_MATCH_WEIGHT * config.config_score
+            else:
+                # Partial overlap - smaller bonus scaled by match ratio
+                bonus = CONFIG_MATCH_WEIGHT * config.config_score * match_ratio * 0.5
+
+            # Extra bonus for validated configurations
+            if config.validated:
+                bonus += CONFIG_VALIDATED_BONUS * match_ratio
+
+            best_bonus = max(best_bonus, bonus)
+
+        return best_bonus
+
     def dream(self, strategy: str = "greedy", **kwargs) -> tuple[list[Component], float]:
         """
         Dream up a new engine configuration.
@@ -487,7 +547,10 @@ class EngineComposer:
                 if rel_score > 0:
                     pair_bonus += rel_score * 0.03
 
-        estimated_score = min(1.0, base_score + interface_bonus + diversity_bonus + pair_bonus)
+        # Configuration bonus - prefer combinations that match known-good configs
+        config_bonus = self._get_configuration_bonus(components)
+
+        estimated_score = min(1.0, base_score + interface_bonus + diversity_bonus + pair_bonus + config_bonus)
         return components, estimated_score
 
     # -------------------------------------------------------------------------
