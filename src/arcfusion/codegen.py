@@ -5,7 +5,6 @@ Takes a list of components and produces a runnable nn.Module.
 """
 
 import re
-import textwrap
 from dataclasses import dataclass
 from typing import Optional
 from .db import Component

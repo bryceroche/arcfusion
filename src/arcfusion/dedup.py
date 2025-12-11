@@ -10,7 +10,6 @@ Identifies and merges duplicate entries based on:
 import re
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Optional
 from .db import ArcFusionDB, Component, Engine
 
 
