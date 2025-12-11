@@ -4,11 +4,13 @@ ArcFusion CLI - Command-line interface.
 
 import argparse
 import sys
+from . import __version__
 from .db import ArcFusionDB
 from .composer import EngineComposer
 from .seeds import seed_transformers, seed_modern_architectures
 from .fetcher import ArxivFetcher
 from .dedup import ComponentDeduplicator, find_duplicate_engines
+from .codegen import CodeGenerator
 
 
 def cmd_init(args):
@@ -271,6 +273,50 @@ def cmd_dedup(args):
     db.close()
 
 
+def cmd_generate(args):
+    """Generate PyTorch code from a dreamed architecture."""
+    db = ArcFusionDB(args.db)
+    gen = CodeGenerator(db)
+
+    # Build kwargs for dream strategy
+    kwargs = {}
+    if args.strategy == "greedy" and args.start:
+        kwargs["start_component"] = args.start
+    elif args.strategy == "random":
+        kwargs["steps"] = args.steps
+        kwargs["temperature"] = args.temperature
+    elif args.strategy == "mutate":
+        kwargs["engine_name"] = args.engine
+        kwargs["mutation_rate"] = args.rate
+    elif args.strategy == "crossover":
+        kwargs["engine1_name"] = args.engine1
+        kwargs["engine2_name"] = args.engine2
+
+    # Generate
+    result = gen.generate_from_dream(args.strategy, name=args.name, **kwargs)
+
+    # Validate
+    valid, error = result.validate_syntax()
+    if not valid:
+        print(f"[ERROR] Generated code has syntax error: {error}")
+        db.close()
+        sys.exit(1)
+
+    # Output
+    if args.output:
+        result.save(args.output)
+        print(f"Generated {result.name} with {result.num_components} components")
+        print(f"Saved to: {args.output}")
+    else:
+        print(result.code)
+
+    print(f"\nComponents used:")
+    for name in result.component_names:
+        print(f"  - {name}")
+
+    db.close()
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="ArcFusion - ML Architecture Component Database",
@@ -287,9 +333,12 @@ Examples:
   arcfusion dream random --steps 5
   arcfusion dream mutate --engine Transformer
   arcfusion dream crossover --engine1 BERT --engine2 Mamba
+  arcfusion generate greedy -o model.py
+  arcfusion generate crossover --engine1 BERT --engine2 Mamba -n HybridModel -o hybrid.py
 """
     )
     parser.add_argument("--db", default="arcfusion.db", help="Database path")
+    parser.add_argument("--version", "-v", action="version", version=f"%(prog)s {__version__}")
 
     subparsers = parser.add_subparsers(dest="command", help="Commands")
 
@@ -335,6 +384,19 @@ Examples:
     dedup_parser.add_argument("--threshold", type=float, default=0.5, help="Similarity threshold (0-1, default: 0.5)")
     dedup_parser.add_argument("--apply", dest="dry_run", action="store_false", default=True, help="Apply changes (default is dry-run)")
 
+    # generate (code generation from dream)
+    gen_parser = subparsers.add_parser("generate", help="Generate PyTorch code from dreamed architecture")
+    gen_parser.add_argument("strategy", choices=["greedy", "random", "mutate", "crossover"])
+    gen_parser.add_argument("--name", "-n", default="DreamedArchitecture", help="Class name for generated architecture")
+    gen_parser.add_argument("--output", "-o", help="Output file path (prints to stdout if not specified)")
+    gen_parser.add_argument("--start", help="Starting component (greedy)")
+    gen_parser.add_argument("--steps", type=int, default=6, help="Number of components (random)")
+    gen_parser.add_argument("--temperature", type=float, default=1.0, help="Temperature (random)")
+    gen_parser.add_argument("--engine", help="Engine to mutate")
+    gen_parser.add_argument("--rate", type=float, default=0.2, help="Mutation rate")
+    gen_parser.add_argument("--engine1", help="First engine (crossover)")
+    gen_parser.add_argument("--engine2", help="Second engine (crossover)")
+
     args = parser.parse_args()
 
     if args.command == "init":
@@ -353,6 +415,8 @@ Examples:
         cmd_analyze(args)
     elif args.command == "dedup":
         cmd_dedup(args)
+    elif args.command == "generate":
+        cmd_generate(args)
     else:
         parser.print_help()
         sys.exit(1)

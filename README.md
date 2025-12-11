@@ -2,7 +2,11 @@
 
 **ML Architecture Component Database & Composer**
 
-Decompose ML architectures into reusable components, track relationships, and dream up new configurations.
+Decompose ML architectures into reusable components, track relationships, dream up new configurations, and generate PyTorch code.
+
+[![Tests](https://img.shields.io/badge/tests-55%20passing-brightgreen)]()
+[![Python](https://img.shields.io/badge/python-3.10+-blue)]()
+[![License](https://img.shields.io/badge/license-MIT-green)]()
 
 ## The Idea
 
@@ -14,10 +18,12 @@ Think of the Transformer as a Formula One engine. It's made of distinct componen
 - **ResidualConnection** - Skip connections
 
 ArcFusion lets you:
-1. **Decompose** - Break architectures into components
+1. **Decompose** - Break architectures into components (manually or via LLM)
 2. **Store** - Track components and their relationships in SQLite
 3. **Compose** - Dream up new architectures by combining components
-4. **Benchmark** - Track what works and what doesn't
+4. **Generate** - Output PyTorch code from dreamed architectures
+5. **Deduplicate** - Fuzzy matching to clean up duplicate components
+6. **Benchmark** - Track what works and what doesn't
 
 ## Installation
 
@@ -49,6 +55,17 @@ arcfusion dream greedy --start Attention
 arcfusion dream random --steps 5 --temperature 0.8
 arcfusion dream mutate --engine Transformer --rate 0.3
 arcfusion dream crossover --engine1 BERT --engine2 Mamba
+
+# Generate PyTorch code from dream
+arcfusion generate greedy -o model.py
+arcfusion generate crossover --engine1 BERT --engine2 Mamba -n HybridModel -o hybrid.py
+
+# LLM-powered analysis (requires ANTHROPIC_API_KEY)
+arcfusion analyze --ids 1706.03762  # Transformer paper
+
+# Find and merge duplicates
+arcfusion dedup              # Preview
+arcfusion dedup --apply      # Apply changes
 ```
 
 ## Python API

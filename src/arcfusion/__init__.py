@@ -18,6 +18,8 @@ from .composer import EngineComposer
 from .decomposer import PaperDecomposer
 from .fetcher import ArxivFetcher, ArxivPaper
 from .seeds import seed_transformers, seed_modern_architectures
+from .dedup import ComponentDeduplicator, DuplicateGroup
+from .codegen import CodeGenerator, GeneratedCode
 
 # Optional LLM-powered analyzer (requires anthropic package)
 try:
@@ -29,8 +31,9 @@ except ImportError:
     AnalysisResult = None
     AnalyzedComponent = None
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 __all__ = [
+    # Database
     "ArcFusionDB",
     "Component",
     "Engine",
@@ -38,14 +41,23 @@ __all__ = [
     "ProcessedPaper",
     "BenchmarkResult",
     "DreamedEngine",
+    # Composition
     "EngineComposer",
+    "CodeGenerator",
+    "GeneratedCode",
+    # Deduplication
+    "ComponentDeduplicator",
+    "DuplicateGroup",
+    # Paper processing
     "PaperDecomposer",
     "ArxivFetcher",
     "ArxivPaper",
+    # LLM analysis (optional)
     "PaperAnalyzer",
     "AnalysisResult",
     "AnalyzedComponent",
     "HAS_ANALYZER",
+    # Seeding
     "seed_transformers",
     "seed_modern_architectures",
 ]
