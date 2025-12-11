@@ -21,6 +21,15 @@ class DuplicateGroup:
     similarity_reason: str  # Why they're grouped
 
 
+def _canonical_sort_key(c: Component) -> tuple:
+    """Sort key for selecting canonical component: has code, higher score, shorter name."""
+    return (
+        -int(bool(c.code.strip())),  # Has code first
+        -c.usefulness_score,          # Higher score
+        len(c.name)                   # Shorter name
+    )
+
+
 def normalize_component_name(name: str, preserve_prefix: bool = True) -> str:
     """
     Normalize a component name for comparison.
@@ -220,11 +229,7 @@ class ComponentDeduplicator:
                     continue
 
                 # Sort by: has code > higher score > shorter name (canonical)
-                group.sort(key=lambda c: (
-                    -int(bool(c.code.strip())),  # Has code first
-                    -c.usefulness_score,          # Higher score
-                    len(c.name)                   # Shorter name
-                ))
+                group.sort(key=_canonical_sort_key)
 
                 canonical = group[0]
                 duplicates = group[1:]
@@ -265,11 +270,7 @@ class ComponentDeduplicator:
 
                 # Determine canonical (prefer one with code, higher score)
                 all_comps = [comp1] + [s[0] for s in similar]
-                all_comps.sort(key=lambda c: (
-                    -int(bool(c.code.strip())),
-                    -c.usefulness_score,
-                    len(c.name)
-                ))
+                all_comps.sort(key=_canonical_sort_key)
 
                 canonical = all_comps[0]
                 duplicates = all_comps[1:]

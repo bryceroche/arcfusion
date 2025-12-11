@@ -193,12 +193,12 @@ def cmd_analyze(args: argparse.Namespace) -> None:
     try:
         from .analyzer import PaperAnalyzer
     except ImportError:
-        print("Error: anthropic package required for LLM analysis")
-        print("Install with: pip install 'arcfusion[llm]'")
+        print("[ERROR] anthropic package required for LLM analysis")
+        print("  Install with: pip install 'arcfusion[llm]'")
         sys.exit(1)
 
     if not os.environ.get("ANTHROPIC_API_KEY"):
-        print("Error: ANTHROPIC_API_KEY environment variable required")
+        print("[ERROR] ANTHROPIC_API_KEY environment variable required")
         sys.exit(1)
 
     with ArcFusionDB(args.db) as db:
