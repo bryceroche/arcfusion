@@ -254,11 +254,10 @@ def generate_architecture_class(
         init_lines.append(f"        {var_name} = {class_name}(d_model=d_model)")
 
         # Forward pass - chain components
+        # Position components add to input (residual), others replace
         category = get_component_category(comp)
         if category == 'position':
             forward_lines.append(f"        x = x + {var_name}(x)")
-        elif category == 'output':
-            forward_lines.append(f"        x = {var_name}(x)")
         else:
             forward_lines.append(f"        x = {var_name}(x)")
 

@@ -15,184 +15,171 @@ from .codegen import CodeGenerator
 
 def cmd_init(args):
     """Initialize database with seed data."""
-    db = ArcFusionDB(args.db)
-    print(f"Initializing {args.db}...")
-    print("\nSeeding Transformer components:")
-    seed_transformers(db)
-    print("\nSeeding modern architectures:")
-    seed_modern_architectures(db)
-    print("\nDone!")
-    print(f"\nStats: {db.stats()}")
-    db.close()
+    with ArcFusionDB(args.db) as db:
+        print(f"Initializing {args.db}...")
+        print("\nSeeding Transformer components:")
+        seed_transformers(db)
+        print("\nSeeding modern architectures:")
+        seed_modern_architectures(db)
+        print("\nDone!")
+        print(f"\nStats: {db.stats()}")
 
 
 def cmd_stats(args):
     """Show database statistics."""
-    db = ArcFusionDB(args.db)
-    stats = db.stats()
-    print(f"Database: {args.db}")
-    print("-" * 40)
-    for k, v in stats.items():
-        print(f"  {k}: {v}")
-    db.close()
+    with ArcFusionDB(args.db) as db:
+        stats = db.stats()
+        print(f"Database: {args.db}")
+        print("-" * 40)
+        for k, v in stats.items():
+            print(f"  {k}: {v}")
 
 
 def cmd_list(args):
     """List components or engines."""
-    db = ArcFusionDB(args.db)
+    with ArcFusionDB(args.db) as db:
+        if args.type == "components":
+            components = db.find_components()
+            print(f"Components ({len(components)}):")
+            for c in components:
+                print(f"  [{c.component_id[:8]}] {c.name}: {c.usefulness_score:.2f}")
 
-    if args.type == "components":
-        components = db.find_components()
-        print(f"Components ({len(components)}):")
-        for c in components:
-            print(f"  [{c.component_id[:8]}] {c.name}: {c.usefulness_score:.2f}")
+        elif args.type == "engines":
+            engines = db.list_engines()
+            print(f"Engines ({len(engines)}):")
+            for e in engines:
+                print(f"  [{e.engine_id[:8]}] {e.name}: {e.engine_score:.2f} ({len(e.component_ids)} components)")
 
-    elif args.type == "engines":
-        engines = db.list_engines()
-        print(f"Engines ({len(engines)}):")
-        for e in engines:
-            print(f"  [{e.engine_id[:8]}] {e.name}: {e.engine_score:.2f} ({len(e.component_ids)} components)")
+        elif args.type == "papers":
+            papers = db.list_processed_papers()
+            print(f"Processed papers ({len(papers)}):")
+            for p in papers:
+                print(f"  [{p.arxiv_id}] {p.title} ({p.status})")
 
-    elif args.type == "papers":
-        papers = db.list_processed_papers()
-        print(f"Processed papers ({len(papers)}):")
-        for p in papers:
-            print(f"  [{p.arxiv_id}] {p.title} ({p.status})")
-
-    elif args.type == "benchmarks":
-        benchmarks = db.list_benchmarks()
-        print(f"Benchmarks ({len(benchmarks)}):")
-        for b in benchmarks:
-            print(f"  {b['benchmark_name']}: {b['num_engines']} engines, avg={b['avg_score']:.2f}")
-
-    db.close()
+        elif args.type == "benchmarks":
+            benchmarks = db.list_benchmarks()
+            print(f"Benchmarks ({len(benchmarks)}):")
+            for b in benchmarks:
+                print(f"  {b['benchmark_name']}: {b['num_engines']} engines, avg={b['avg_score']:.2f}")
 
 
 def cmd_dream(args):
     """Dream up a new architecture."""
-    db = ArcFusionDB(args.db)
-    composer = EngineComposer(db)
+    with ArcFusionDB(args.db) as db:
+        composer = EngineComposer(db)
 
-    kwargs = {}
-    if args.strategy == "greedy" and args.start:
-        kwargs["start_component"] = args.start
-    elif args.strategy == "random":
-        kwargs["steps"] = args.steps
-        kwargs["temperature"] = args.temperature
-    elif args.strategy == "mutate":
-        kwargs["engine_name"] = args.engine
-        kwargs["mutation_rate"] = args.rate
-    elif args.strategy == "crossover":
-        kwargs["engine1_name"] = args.engine1
-        kwargs["engine2_name"] = args.engine2
-
-    try:
-        components, score = composer.dream(args.strategy, **kwargs)
-    except ValueError as e:
-        print(f"[ERROR] {e}")
-        db.close()
-        sys.exit(1)
-
-    # Check for failure (score -1 indicates composition failed)
-    if score < 0 or not components:
-        print(f"[ERROR] Dream composition failed for strategy '{args.strategy}'")
-        if args.strategy == "crossover":
-            print(f"  Check that engines '{args.engine1}' and '{args.engine2}' exist")
-            print(f"  Run: arcfusion list engines")
+        kwargs = {}
+        if args.strategy == "greedy" and args.start:
+            kwargs["start_component"] = args.start
+        elif args.strategy == "random":
+            kwargs["steps"] = args.steps
+            kwargs["temperature"] = args.temperature
         elif args.strategy == "mutate":
-            print(f"  Check that engine '{args.engine}' exists")
-        db.close()
-        sys.exit(1)
+            kwargs["engine_name"] = args.engine
+            kwargs["mutation_rate"] = args.rate
+        elif args.strategy == "crossover":
+            kwargs["engine1_name"] = args.engine1
+            kwargs["engine2_name"] = args.engine2
 
-    print(f"Strategy: {args.strategy}")
-    print(f"Estimated score: {score:.2f}")
-    print(f"Components ({len(components)}):")
-    for c in components:
-        print(f"  - {c.name}")
+        try:
+            components, score = composer.dream(args.strategy, **kwargs)
+        except ValueError as e:
+            print(f"[ERROR] {e}")
+            sys.exit(1)
 
-    db.close()
+        # Check for failure (score -1 indicates composition failed)
+        if score < 0 or not components:
+            print(f"[ERROR] Dream composition failed for strategy '{args.strategy}'")
+            if args.strategy == "crossover":
+                print(f"  Check that engines '{args.engine1}' and '{args.engine2}' exist")
+                print(f"  Run: arcfusion list engines")
+            elif args.strategy == "mutate":
+                print(f"  Check that engine '{args.engine}' exists")
+            sys.exit(1)
+
+        print(f"Strategy: {args.strategy}")
+        print(f"Estimated score: {score:.2f}")
+        print(f"Components ({len(components)}):")
+        for c in components:
+            print(f"  - {c.name}")
 
 
 def cmd_show(args):
     """Show details of a component or engine."""
-    db = ArcFusionDB(args.db)
-
-    # Try as engine first
-    engine = db.get_engine_by_name(args.name)
-    if engine:
-        print(f"Engine: {engine.name}")
-        print(f"  ID: {engine.engine_id}")
-        print(f"  Score: {engine.engine_score}")
-        print(f"  Paper: {engine.paper_url}")
-        print(f"  Description: {engine.description[:200]}...")
-        print(f"  Components ({len(engine.component_ids)}):")
-        for cid in engine.component_ids:
-            comp = db.get_component(cid)
-            if comp:
-                print(f"    - {comp.name}")
-    else:
-        # Try as component
-        components = db.find_components(args.name)
-        if components:
-            comp = components[0]
-            print(f"Component: {comp.name}")
-            print(f"  ID: {comp.component_id}")
-            print(f"  Score: {comp.usefulness_score}")
-            print(f"  Description: {comp.description}")
-            if comp.source_paper_id:
-                print(f"  Source paper: {comp.source_paper_id} ({comp.introduced_year})")
-            print(f"  Interface in: {comp.interface_in}")
-            print(f"  Interface out: {comp.interface_out}")
-            if comp.time_complexity:
-                print(f"  Time complexity: {comp.time_complexity}")
-            if comp.space_complexity:
-                print(f"  Space complexity: {comp.space_complexity}")
-            if comp.flops_formula:
-                print(f"  FLOPs: {comp.flops_formula}")
-            print(f"  Parallelizable: {comp.is_parallelizable}, Causal: {comp.is_causal}")
-            if comp.math_operations:
-                print(f"  Math ops: {', '.join(comp.math_operations)}")
-            if comp.hyperparameters:
-                print(f"  Hyperparameters: {comp.hyperparameters}")
-
-            compatible = db.get_compatible_components(comp.component_id, min_score=0.7)
-            if compatible:
-                print(f"  Compatible with:")
-                for cid, score in compatible[:5]:
-                    c = db.get_component(cid)
-                    if c:
-                        print(f"    - {c.name}: {score:.2f}")
+    with ArcFusionDB(args.db) as db:
+        # Try as engine first
+        engine = db.get_engine_by_name(args.name)
+        if engine:
+            print(f"Engine: {engine.name}")
+            print(f"  ID: {engine.engine_id}")
+            print(f"  Score: {engine.engine_score}")
+            print(f"  Paper: {engine.paper_url}")
+            print(f"  Description: {engine.description[:200]}...")
+            print(f"  Components ({len(engine.component_ids)}):")
+            for cid in engine.component_ids:
+                comp = db.get_component(cid)
+                if comp:
+                    print(f"    - {comp.name}")
         else:
-            print(f"Not found: {args.name}")
+            # Try as component
+            components = db.find_components(args.name)
+            if components:
+                comp = components[0]
+                print(f"Component: {comp.name}")
+                print(f"  ID: {comp.component_id}")
+                print(f"  Score: {comp.usefulness_score}")
+                print(f"  Description: {comp.description}")
+                if comp.source_paper_id:
+                    print(f"  Source paper: {comp.source_paper_id} ({comp.introduced_year})")
+                print(f"  Interface in: {comp.interface_in}")
+                print(f"  Interface out: {comp.interface_out}")
+                if comp.time_complexity:
+                    print(f"  Time complexity: {comp.time_complexity}")
+                if comp.space_complexity:
+                    print(f"  Space complexity: {comp.space_complexity}")
+                if comp.flops_formula:
+                    print(f"  FLOPs: {comp.flops_formula}")
+                print(f"  Parallelizable: {comp.is_parallelizable}, Causal: {comp.is_causal}")
+                if comp.math_operations:
+                    print(f"  Math ops: {', '.join(comp.math_operations)}")
+                if comp.hyperparameters:
+                    print(f"  Hyperparameters: {comp.hyperparameters}")
 
-    db.close()
+                compatible = db.get_compatible_components(comp.component_id, min_score=0.7)
+                if compatible:
+                    print(f"  Compatible with:")
+                    for cid, score in compatible[:5]:
+                        c = db.get_component(cid)
+                        if c:
+                            print(f"    - {c.name}: {score:.2f}")
+            else:
+                print(f"Not found: {args.name}")
 
 
 def cmd_ingest(args):
     """Ingest papers from arXiv."""
-    db = ArcFusionDB(args.db)
-    fetcher = ArxivFetcher(db)
+    with ArcFusionDB(args.db) as db:
+        fetcher = ArxivFetcher(db)
 
-    if args.query:
-        # Custom search query
-        print(f"Searching arXiv for: {args.query}")
-        stats = fetcher.ingest_search(args.query, max_results=args.max)
-    elif args.ids:
-        # Specific paper IDs
-        print(f"Fetching {len(args.ids)} specific papers...")
-        papers = fetcher.fetch_by_ids(args.ids)
-        stats = fetcher.ingest_batch(papers, max_papers=len(args.ids))
-    else:
-        # Default: search for architecture papers
-        print(f"Searching for ML architecture papers in {args.category}...")
-        stats = fetcher.ingest_architectures(
-            max_results=args.max,
-            category=args.category
-        )
+        if args.query:
+            # Custom search query
+            print(f"Searching arXiv for: {args.query}")
+            fetcher.ingest_search(args.query, max_results=args.max)
+        elif args.ids:
+            # Specific paper IDs
+            print(f"Fetching {len(args.ids)} specific papers...")
+            papers = fetcher.fetch_by_ids(args.ids)
+            fetcher.ingest_batch(papers, max_papers=len(args.ids))
+        else:
+            # Default: search for architecture papers
+            print(f"Searching for ML architecture papers in {args.category}...")
+            fetcher.ingest_architectures(
+                max_results=args.max,
+                category=args.category
+            )
 
-    # Show updated DB stats
-    print(f"\nDatabase stats: {db.stats()}")
-    db.close()
+        # Show updated DB stats
+        print(f"\nDatabase stats: {db.stats()}")
 
 
 def cmd_analyze(args):
@@ -209,128 +196,121 @@ def cmd_analyze(args):
         print("Error: ANTHROPIC_API_KEY environment variable required")
         sys.exit(1)
 
-    db = ArcFusionDB(args.db)
-    fetcher = ArxivFetcher(db)
-    analyzer = PaperAnalyzer(db)
+    with ArcFusionDB(args.db) as db:
+        fetcher = ArxivFetcher(db)
+        analyzer = PaperAnalyzer(db)
 
-    total_new = 0
-    for arxiv_id in args.ids:
+        total_new = 0
+        for arxiv_id in args.ids:
+            print(f"\n{'='*60}")
+            print(f"Fetching {arxiv_id}...")
+
+            paper = fetcher.fetch_by_id(arxiv_id)
+            if not paper:
+                print(f"  Could not fetch paper {arxiv_id}")
+                continue
+
+            engine, new_components = analyzer.analyze_and_ingest(
+                title=paper.title,
+                content=paper.abstract,
+                paper_id=paper.arxiv_id,
+                paper_url=paper.pdf_url,
+                min_confidence=args.min_confidence,
+            )
+
+            total_new += len(new_components)
+
         print(f"\n{'='*60}")
-        print(f"Fetching {arxiv_id}...")
-
-        paper = fetcher.fetch_by_id(arxiv_id)
-        if not paper:
-            print(f"  Could not fetch paper {arxiv_id}")
-            continue
-
-        engine, new_components = analyzer.analyze_and_ingest(
-            title=paper.title,
-            content=paper.abstract,
-            paper_id=paper.arxiv_id,
-            paper_url=paper.pdf_url,
-            min_confidence=args.min_confidence,
-        )
-
-        total_new += len(new_components)
-
-    print(f"\n{'='*60}")
-    print(f"Analysis complete. Added {total_new} new components.")
-    print(f"Database stats: {db.stats()}")
-    db.close()
+        print(f"Analysis complete. Added {total_new} new components.")
+        print(f"Database stats: {db.stats()}")
 
 
 def cmd_dedup(args):
     """Find and merge duplicate components."""
-    db = ArcFusionDB(args.db)
-    deduplicator = ComponentDeduplicator(db)
+    with ArcFusionDB(args.db) as db:
+        deduplicator = ComponentDeduplicator(db)
 
-    # Find duplicates
-    print(f"Scanning for duplicates (threshold: {args.threshold})...\n")
-    groups = deduplicator.find_duplicates(threshold=args.threshold)
+        # Find duplicates
+        print(f"Scanning for duplicates (threshold: {args.threshold})...\n")
+        groups = deduplicator.find_duplicates(threshold=args.threshold)
 
-    if not groups:
-        print("No duplicates found!")
-        db.close()
-        return
+        if not groups:
+            print("No duplicates found!")
+            return
 
-    print(f"Found {len(groups)} duplicate groups:\n")
-    print("=" * 60)
+        print(f"Found {len(groups)} duplicate groups:\n")
+        print("=" * 60)
 
-    for i, group in enumerate(groups, 1):
-        print(f"\n{i}. KEEP: {group.canonical.name}")
-        print(f"   (ID: {group.canonical.component_id[:8]}, score: {group.canonical.usefulness_score:.2f}, has_code: {bool(group.canonical.code.strip())})")
-        print(f"   Reason: {group.similarity_reason}")
-        print(f"   MERGE:")
-        for dup in group.duplicates:
-            print(f"     - {dup.name} ({dup.component_id[:8]}, score: {dup.usefulness_score:.2f})")
+        for i, group in enumerate(groups, 1):
+            print(f"\n{i}. KEEP: {group.canonical.name}")
+            print(f"   (ID: {group.canonical.component_id[:8]}, score: {group.canonical.usefulness_score:.2f}, has_code: {bool(group.canonical.code.strip())})")
+            print(f"   Reason: {group.similarity_reason}")
+            print(f"   MERGE:")
+            for dup in group.duplicates:
+                print(f"     - {dup.name} ({dup.component_id[:8]}, score: {dup.usefulness_score:.2f})")
 
-    # Also check for duplicate engines
-    dup_engines = find_duplicate_engines(db)
-    if dup_engines:
-        print(f"\n{'=' * 60}")
-        print(f"\nFound {len(dup_engines)} duplicate engine pairs:")
-        for e1, e2, reason in dup_engines:
-            print(f"  - {e1.name} ({e1.engine_id[:8]}) <-> {e2.name} ({e2.engine_id[:8]})")
-            print(f"    Reason: {reason}")
+        # Also check for duplicate engines
+        dup_engines = find_duplicate_engines(db)
+        if dup_engines:
+            print(f"\n{'=' * 60}")
+            print(f"\nFound {len(dup_engines)} duplicate engine pairs:")
+            for e1, e2, reason in dup_engines:
+                print(f"  - {e1.name} ({e1.engine_id[:8]}) <-> {e2.name} ({e2.engine_id[:8]})")
+                print(f"    Reason: {reason}")
 
-    if args.dry_run:
-        print(f"\n{'=' * 60}")
-        print("\n[DRY RUN] No changes made. Use --apply to merge duplicates.")
-    else:
-        print(f"\n{'=' * 60}")
-        print("\nMerging duplicates...")
-        for group in groups:
-            result = deduplicator.merge_group(group, dry_run=False)
-            print(f"  Merged {len(result['merged'])} duplicates into '{result['canonical']}'")
+        if args.dry_run:
+            print(f"\n{'=' * 60}")
+            print("\n[DRY RUN] No changes made. Use --apply to merge duplicates.")
+        else:
+            print(f"\n{'=' * 60}")
+            print("\nMerging duplicates...")
+            for group in groups:
+                result = deduplicator.merge_group(group, dry_run=False)
+                print(f"  Merged {len(result['merged'])} duplicates into '{result['canonical']}'")
 
-        print(f"\nDone! Merged {sum(len(g.duplicates) for g in groups)} components.")
-        print(f"Database stats: {db.stats()}")
-
-    db.close()
+            print(f"\nDone! Merged {sum(len(g.duplicates) for g in groups)} components.")
+            print(f"Database stats: {db.stats()}")
 
 
 def cmd_generate(args):
     """Generate PyTorch code from a dreamed architecture."""
-    db = ArcFusionDB(args.db)
-    gen = CodeGenerator(db)
+    with ArcFusionDB(args.db) as db:
+        gen = CodeGenerator(db)
 
-    # Build kwargs for dream strategy
-    kwargs = {}
-    if args.strategy == "greedy" and args.start:
-        kwargs["start_component"] = args.start
-    elif args.strategy == "random":
-        kwargs["steps"] = args.steps
-        kwargs["temperature"] = args.temperature
-    elif args.strategy == "mutate":
-        kwargs["engine_name"] = args.engine
-        kwargs["mutation_rate"] = args.rate
-    elif args.strategy == "crossover":
-        kwargs["engine1_name"] = args.engine1
-        kwargs["engine2_name"] = args.engine2
+        # Build kwargs for dream strategy
+        kwargs = {}
+        if args.strategy == "greedy" and args.start:
+            kwargs["start_component"] = args.start
+        elif args.strategy == "random":
+            kwargs["steps"] = args.steps
+            kwargs["temperature"] = args.temperature
+        elif args.strategy == "mutate":
+            kwargs["engine_name"] = args.engine
+            kwargs["mutation_rate"] = args.rate
+        elif args.strategy == "crossover":
+            kwargs["engine1_name"] = args.engine1
+            kwargs["engine2_name"] = args.engine2
 
-    # Generate
-    result = gen.generate_from_dream(args.strategy, name=args.name, **kwargs)
+        # Generate
+        result = gen.generate_from_dream(args.strategy, name=args.name, **kwargs)
 
-    # Validate
-    valid, error = result.validate_syntax()
-    if not valid:
-        print(f"[ERROR] Generated code has syntax error: {error}")
-        db.close()
-        sys.exit(1)
+        # Validate
+        valid, error = result.validate_syntax()
+        if not valid:
+            print(f"[ERROR] Generated code has syntax error: {error}")
+            sys.exit(1)
 
-    # Output
-    if args.output:
-        result.save(args.output)
-        print(f"Generated {result.name} with {result.num_components} components")
-        print(f"Saved to: {args.output}")
-    else:
-        print(result.code)
+        # Output
+        if args.output:
+            result.save(args.output)
+            print(f"Generated {result.name} with {result.num_components} components")
+            print(f"Saved to: {args.output}")
+        else:
+            print(result.code)
 
-    print(f"\nComponents used:")
-    for name in result.component_names:
-        print(f"  - {name}")
-
-    db.close()
+        print(f"\nComponents used:")
+        for name in result.component_names:
+            print(f"  - {name}")
 
 
 def main():

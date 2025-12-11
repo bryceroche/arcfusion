@@ -187,17 +187,30 @@ class PaperAnalyzer:
                 messages=[{"role": "user", "content": prompt}]
             )
 
-            # Extract JSON from response
+            # Extract JSON from response with defensive checks
+            if not response.content:
+                if verbose:
+                    print("  [ERROR] Empty response from LLM")
+                return None
+
             response_text = response.content[0].text
 
             # Find JSON block (handle markdown code blocks)
             if "```json" in response_text:
                 json_start = response_text.find("```json") + 7
                 json_end = response_text.find("```", json_start)
+                if json_end == -1:
+                    if verbose:
+                        print("  [ERROR] Malformed JSON code block (missing closing ```)")
+                    return None
                 response_text = response_text[json_start:json_end]
             elif "```" in response_text:
                 json_start = response_text.find("```") + 3
                 json_end = response_text.find("```", json_start)
+                if json_end == -1:
+                    if verbose:
+                        print("  [ERROR] Malformed code block (missing closing ```)")
+                    return None
                 response_text = response_text[json_start:json_end]
 
             data = json.loads(response_text.strip())

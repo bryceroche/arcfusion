@@ -260,6 +260,9 @@ class EngineComposer:
 
     def random_walk_compose(self, steps: int = 5, temperature: float = 1.0) -> list[Component]:
         """Random walk through component space, biased by interface compatibility."""
+        if temperature < 0:
+            raise ValueError("temperature must be >= 0")
+
         all_components = self.db.find_components()
         if not all_components:
             return []
@@ -269,7 +272,8 @@ class EngineComposer:
         if not start_candidates:
             start_candidates = all_components
 
-        weights = [c.usefulness_score ** temperature for c in start_candidates]
+        # Ensure weights are valid (non-zero) for random.choices
+        weights = [max(0.01, c.usefulness_score) ** temperature for c in start_candidates]
         current = random.choices(start_candidates, weights=weights)[0]
 
         engine = [current]
@@ -302,7 +306,8 @@ class EngineComposer:
                     else:
                         boosted.append((comp, score))
 
-                weights = [score ** temperature for _, score in boosted]
+                # Ensure weights are valid (non-zero) for random.choices
+                weights = [max(0.01, score) ** temperature for _, score in boosted]
                 current = random.choices([c for c, _ in boosted], weights=weights)[0]
 
             engine.append(current)

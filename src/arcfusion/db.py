@@ -316,6 +316,15 @@ class ArcFusionDB:
         self.conn.commit()
         return cursor.rowcount > 0
 
+    def _safe_json_loads(self, value: str, default):
+        """Safely parse JSON, returning default on error."""
+        if not value:
+            return default
+        try:
+            return json.loads(value)
+        except (json.JSONDecodeError, TypeError):
+            return default
+
     def _row_to_component(self, row) -> Component:
         """Convert a database row to a Component object"""
         keys = row.keys()
@@ -323,19 +332,19 @@ class ArcFusionDB:
             component_id=row['component_id'],
             name=row['name'],
             description=row['description'],
-            interface_in=json.loads(row['interface_in']) if row['interface_in'] else {},
-            interface_out=json.loads(row['interface_out']) if row['interface_out'] else {},
+            interface_in=self._safe_json_loads(row['interface_in'], {}),
+            interface_out=self._safe_json_loads(row['interface_out'], {}),
             code=row['code'] or "",
             usefulness_score=row['usefulness_score'] or 0.0,
             source_paper_id=row['source_paper_id'] or "" if 'source_paper_id' in keys else "",
             introduced_year=row['introduced_year'] or 0 if 'introduced_year' in keys else 0,
-            hyperparameters=json.loads(row['hyperparameters']) if ('hyperparameters' in keys and row['hyperparameters']) else {},
+            hyperparameters=self._safe_json_loads(row['hyperparameters'], {}) if 'hyperparameters' in keys else {},
             time_complexity=row['time_complexity'] or "" if 'time_complexity' in keys else "",
             space_complexity=row['space_complexity'] or "" if 'space_complexity' in keys else "",
             flops_formula=row['flops_formula'] or "" if 'flops_formula' in keys else "",
             is_parallelizable=bool(row['is_parallelizable']) if 'is_parallelizable' in keys else True,
             is_causal=bool(row['is_causal']) if 'is_causal' in keys else False,
-            math_operations=json.loads(row['math_operations']) if ('math_operations' in keys and row['math_operations']) else [],
+            math_operations=self._safe_json_loads(row['math_operations'], []) if 'math_operations' in keys else [],
         )
 
     def find_components(
@@ -585,7 +594,7 @@ class ArcFusionDB:
                 engine_id=r['engine_id'],
                 benchmark_name=r['benchmark_name'],
                 score=r['score'],
-                parameters=json.loads(r['parameters']) if r['parameters'] else {},
+                parameters=self._safe_json_loads(r['parameters'], {}),
                 notes=r['notes'] or "",
                 created_at=r['created_at']
             ) for r in rows
@@ -682,8 +691,8 @@ class ArcFusionDB:
             return DreamedEngine(
                 dream_id=row['dream_id'],
                 strategy=row['strategy'],
-                parent_engine_ids=json.loads(row['parent_engine_ids']) if row['parent_engine_ids'] else [],
-                component_ids=json.loads(row['component_ids']),
+                parent_engine_ids=self._safe_json_loads(row['parent_engine_ids'], []),
+                component_ids=self._safe_json_loads(row['component_ids'], []),
                 estimated_score=row['estimated_score'] or 0.0,
                 validated=bool(row['validated']),
                 actual_score=row['actual_score'] or 0.0,
@@ -710,8 +719,8 @@ class ArcFusionDB:
             DreamedEngine(
                 dream_id=r['dream_id'],
                 strategy=r['strategy'],
-                parent_engine_ids=json.loads(r['parent_engine_ids']) if r['parent_engine_ids'] else [],
-                component_ids=json.loads(r['component_ids']),
+                parent_engine_ids=self._safe_json_loads(r['parent_engine_ids'], []),
+                component_ids=self._safe_json_loads(r['component_ids'], []),
                 estimated_score=r['estimated_score'] or 0.0,
                 validated=bool(r['validated']),
                 actual_score=r['actual_score'] or 0.0,
