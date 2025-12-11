@@ -6,6 +6,10 @@ Includes Transformer components and modern architectures (Mamba, RWKV, RetNet, e
 
 from .db import ArcFusionDB, Component, Engine, ComponentRelationship
 
+# Relationship score for components in well-known architectures
+# Higher than extracted (0.7) since these are verified working combinations
+DEFAULT_SEED_RELATIONSHIP_SCORE = 0.8
+
 
 TRANSFORMER_COMPONENTS = [
     Component(
@@ -679,7 +683,15 @@ def seed_modern_architectures(db: ArcFusionDB, verbose: bool = True) -> None:
                 print(f"  Skipping {arch['name']} (exists)")
             continue
 
-        comp_ids = [name_to_id[n] for n in arch["components"] if n in name_to_id]
+        comp_ids = []
+        missing = []
+        for name in arch["components"]:
+            if name in name_to_id:
+                comp_ids.append(name_to_id[name])
+            else:
+                missing.append(name)
+        if missing and verbose:
+            print(f"  [WARN] {arch['name']}: missing components {missing}")
 
         engine = Engine(
             name=arch["name"],
@@ -699,7 +711,7 @@ def seed_modern_architectures(db: ArcFusionDB, verbose: bool = True) -> None:
                     component1_id=cid1,
                     component2_id=cid2,
                     engine_id=engine.engine_id,
-                    c2c_score=0.8
+                    c2c_score=DEFAULT_SEED_RELATIONSHIP_SCORE
                 )
                 db.add_relationship(rel)
 

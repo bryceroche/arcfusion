@@ -6,6 +6,10 @@ Reads ML papers and decomposes their architectures into components.
 
 from .db import ArcFusionDB, Component, Engine, ComponentRelationship
 
+# Default relationship score for components extracted from the same paper
+# Lower than seed data (0.8) since extraction has more uncertainty
+DEFAULT_EXTRACTED_RELATIONSHIP_SCORE = 0.7
+
 
 class PaperDecomposer:
     """Extract architecture components from paper text."""
@@ -126,7 +130,7 @@ class PaperDecomposer:
                     component1_id=cid1,
                     component2_id=cid2,
                     engine_id=engine.engine_id,
-                    c2c_score=0.7
+                    c2c_score=DEFAULT_EXTRACTED_RELATIONSHIP_SCORE
                 )
                 self.db.add_relationship(rel)
 
