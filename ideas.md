@@ -35,4 +35,26 @@ did we setup the DB and python pipeline correctly have we forgotten anything?
 does the DB schema make sense for what we're trying to do? 
 should we be adding other math functions to the componets table? 
 
-what do you think of these names?  EngineCoreX or ForgeComponentX
+what do you think of these names?  EngineCoreX or ForgeComponentX CoreComponent or CoreComponentX
+
+be sure to use beads to track all these issues
+  Critical Issues
+
+  | #   | Issue                                                                                            | Severity |
+  |-----|--------------------------------------------------------------------------------------------------|----------|
+  | 1   | Crossover returns 0 components - Category filtering + interface compatibility removes everything | CRITICAL |
+  | 2   | Decomposer uses wrong query - Passes category as name pattern, never finds matches               | CRITICAL |
+  | 3   | 50% modules untested - composer, dedup, decomposer, seeds have no tests                          | HIGH     |
+  | 4   | Analyzer skips relationship validation - Can create orphaned refs                                | HIGH     |
+  | 5   | Weak interface compatibility - "variable" shapes too lenient                                     | MEDIUM   |
+  | 6   | Dream fails silently - Returns ([], 0.0) with no error signal                                    | MEDIUM   |
+  | 7   | No auto-validation on save - Could write invalid Python                                          | MEDIUM   |
+
+
+good. adding tests is a low risk way to improve the project. I defer to you the PM on next steps
+
+order of components matters!  we need to track this
+
+Our DB should track configurations of components.  take the transformer for example.  lets say it has 15 components.  We should track different configurations of those 15 components.  Say if you put 7 components from the transformer together in a certain order it generally produces good results. We should track that and need to determine which component configurations are worth tracking.  so for the transformer there might be many such configurations worth tracking.  that should help the dream engine when it's time to assemble new configurations of components.  
+
+create beads issue: hypothetically speaking - Would our approach be able to find the transformer architecture if the attention paper wasn't published?
