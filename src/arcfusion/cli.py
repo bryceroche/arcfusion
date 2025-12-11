@@ -3,6 +3,7 @@ ArcFusion CLI - Command-line interface.
 """
 
 import argparse
+import os
 import sys
 from . import __version__
 from .db import ArcFusionDB
@@ -13,7 +14,7 @@ from .dedup import ComponentDeduplicator, find_duplicate_engines
 from .codegen import CodeGenerator
 
 
-def _build_dream_kwargs(args) -> dict:
+def _build_dream_kwargs(args: argparse.Namespace) -> dict:
     """Build kwargs dict for dream/compose strategies from CLI args."""
     kwargs = {}
     if args.strategy == "greedy" and getattr(args, 'start', None):
@@ -30,7 +31,7 @@ def _build_dream_kwargs(args) -> dict:
     return kwargs
 
 
-def cmd_init(args):
+def cmd_init(args: argparse.Namespace) -> None:
     """Initialize database with seed data."""
     with ArcFusionDB(args.db) as db:
         print(f"Initializing {args.db}...")
@@ -42,7 +43,7 @@ def cmd_init(args):
         print(f"\nStats: {db.stats()}")
 
 
-def cmd_stats(args):
+def cmd_stats(args: argparse.Namespace) -> None:
     """Show database statistics."""
     with ArcFusionDB(args.db) as db:
         stats = db.stats()
@@ -52,7 +53,7 @@ def cmd_stats(args):
             print(f"  {k}: {v}")
 
 
-def cmd_list(args):
+def cmd_list(args: argparse.Namespace) -> None:
     """List components or engines."""
     with ArcFusionDB(args.db) as db:
         if args.type == "components":
@@ -80,7 +81,7 @@ def cmd_list(args):
                 print(f"  {b['benchmark_name']}: {b['num_engines']} engines, avg={b['avg_score']:.2f}")
 
 
-def cmd_dream(args):
+def cmd_dream(args: argparse.Namespace) -> None:
     """Dream up a new architecture."""
     with ArcFusionDB(args.db) as db:
         composer = EngineComposer(db)
@@ -109,7 +110,7 @@ def cmd_dream(args):
             print(f"  - {c.name}")
 
 
-def cmd_show(args):
+def cmd_show(args: argparse.Namespace) -> None:
     """Show details of a component or engine."""
     with ArcFusionDB(args.db) as db:
         # Try as engine first
@@ -161,7 +162,7 @@ def cmd_show(args):
                 print(f"Not found: {args.name}")
 
 
-def cmd_ingest(args):
+def cmd_ingest(args: argparse.Namespace) -> None:
     """Ingest papers from arXiv."""
     with ArcFusionDB(args.db) as db:
         fetcher = ArxivFetcher(db)
@@ -187,7 +188,7 @@ def cmd_ingest(args):
         print(f"\nDatabase stats: {db.stats()}")
 
 
-def cmd_analyze(args):
+def cmd_analyze(args: argparse.Namespace) -> None:
     """Deep LLM analysis of papers."""
     try:
         from .analyzer import PaperAnalyzer
@@ -196,7 +197,6 @@ def cmd_analyze(args):
         print("Install with: pip install 'arcfusion[llm]'")
         sys.exit(1)
 
-    import os
     if not os.environ.get("ANTHROPIC_API_KEY"):
         print("Error: ANTHROPIC_API_KEY environment variable required")
         sys.exit(1)
@@ -230,7 +230,7 @@ def cmd_analyze(args):
         print(f"Database stats: {db.stats()}")
 
 
-def cmd_dedup(args):
+def cmd_dedup(args: argparse.Namespace) -> None:
     """Find and merge duplicate components."""
     with ArcFusionDB(args.db) as db:
         deduplicator = ComponentDeduplicator(db)
@@ -277,7 +277,7 @@ def cmd_dedup(args):
             print(f"Database stats: {db.stats()}")
 
 
-def cmd_config(args):
+def cmd_config(args: argparse.Namespace) -> None:
     """Manage component configurations."""
     with ArcFusionDB(args.db) as db:
         composer = EngineComposer(db)
@@ -352,7 +352,7 @@ def cmd_config(args):
                     print(f"    - [Unknown: {cid}]")
 
 
-def cmd_generate(args):
+def cmd_generate(args: argparse.Namespace) -> None:
     """Generate PyTorch code from a dreamed architecture."""
     with ArcFusionDB(args.db) as db:
         gen = CodeGenerator(db)
@@ -384,7 +384,7 @@ def cmd_generate(args):
             print(f"  - {name}")
 
 
-def main():
+def main() -> None:
     """
     ArcFusion CLI entry point.
 

@@ -363,7 +363,7 @@ class ArcFusionDB:
         except (json.JSONDecodeError, TypeError):
             return default
 
-    def _row_to_component(self, row) -> Component:
+    def _row_to_component(self, row: sqlite3.Row) -> Component:
         """Convert a database row to a Component object"""
         keys = row.keys()
         return Component(
@@ -808,7 +808,7 @@ class ArcFusionDB:
             return self._row_to_configuration(row)
         return None
 
-    def _row_to_configuration(self, row) -> ComponentConfiguration:
+    def _row_to_configuration(self, row: sqlite3.Row) -> ComponentConfiguration:
         """Convert a database row to a ComponentConfiguration object."""
         return ComponentConfiguration(
             config_id=row['config_id'],
