@@ -731,13 +731,13 @@ class ArcFusionDB:
 
     def validate_dreamed_engine(self, dream_id: str, actual_score: float, notes: str = "") -> bool:
         """Mark a dreamed engine as validated with actual score"""
-        self.conn.execute("""
+        cursor = self.conn.execute("""
             UPDATE dreamed_engines
             SET validated = 1, actual_score = ?, notes = ?
             WHERE dream_id = ?
         """, (actual_score, notes, dream_id))
         self.conn.commit()
-        return self.conn.total_changes > 0
+        return cursor.rowcount > 0
 
     # -------------------------------------------------------------------------
     # Component compatibility operations (aggregate scores)

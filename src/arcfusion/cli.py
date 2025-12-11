@@ -292,7 +292,11 @@ def cmd_generate(args):
             kwargs["engine2_name"] = args.engine2
 
         # Generate
-        result = gen.generate_from_dream(args.strategy, name=args.name, **kwargs)
+        try:
+            result = gen.generate_from_dream(args.strategy, name=args.name, **kwargs)
+        except ValueError as e:
+            print(f"[ERROR] Code generation failed: {e}")
+            sys.exit(1)
 
         # Validate
         valid, error = result.validate_syntax()

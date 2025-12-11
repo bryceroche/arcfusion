@@ -25,6 +25,12 @@ CATEGORY_ORDER = {
     'training': 7,      # Training-specific (LR schedule, regularization)
 }
 
+# Compatibility scoring weights for component matching
+INTERFACE_WEIGHT = 0.4      # Weight for interface shape compatibility
+RELATIONSHIP_WEIGHT = 0.4   # Weight for learned relationship scores
+CATEGORY_BONUS = 0.2        # Bonus for correct category ordering
+CATEGORY_CLOSE_BONUS = 0.1  # Bonus for nearly correct ordering
+
 
 def normalize_shape(shape_str: str) -> str:
     """Normalize a shape string for comparison."""
@@ -151,23 +157,23 @@ class EngineComposer:
         compatible, interface_score = interfaces_compatible(comp1, comp2)
         if not compatible:
             return 0.0
-        score += interface_score * 0.4
+        score += interface_score * INTERFACE_WEIGHT
 
         # Relationship from database (0-1)
         rel_cache = self._build_relationship_cache()
         rel_score = rel_cache.get(comp1.component_id, {}).get(comp2.component_id, 0.0)
-        score += rel_score * 0.4
+        score += rel_score * RELATIONSHIP_WEIGHT
 
-        # Category ordering bonus (0-0.2)
+        # Category ordering bonus
         cat1 = get_component_category(comp1)
         cat2 = get_component_category(comp2)
         order1 = CATEGORY_ORDER.get(cat1, 4)
         order2 = CATEGORY_ORDER.get(cat2, 4)
 
         if order1 <= order2:  # Correct order
-            score += 0.2
+            score += CATEGORY_BONUS
         elif order1 - order2 <= 1:  # Close enough
-            score += 0.1
+            score += CATEGORY_CLOSE_BONUS
 
         return min(score, 1.0)
 
