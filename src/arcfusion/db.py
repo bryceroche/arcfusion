@@ -453,7 +453,7 @@ class ArcFusionDB:
         rows = self.conn.execute(
             "SELECT component_id FROM engine_components WHERE engine_id = ? ORDER BY position",
             (engine_id,)
-        ).fetchall() or []
+        ).fetchall()
         comp_ids = [r['component_id'] for r in rows]
 
         return Engine(
@@ -824,10 +824,10 @@ class ArcFusionDB:
 
     def find_configurations(
         self,
-        min_score: float = None,
-        validated: bool = None,
-        min_size: int = None,
-        max_size: int = None
+        min_score: Optional[float] = None,
+        validated: Optional[bool] = None,
+        min_size: Optional[int] = None,
+        max_size: Optional[int] = None
     ) -> list[ComponentConfiguration]:
         """Find configurations matching criteria."""
         query = "SELECT * FROM component_configurations WHERE 1=1"
@@ -841,7 +841,7 @@ class ArcFusionDB:
             params.append(1 if validated else 0)
 
         query += " ORDER BY config_score DESC, usage_count DESC"
-        rows = self.conn.execute(query, params).fetchall() or []
+        rows = self.conn.execute(query, params).fetchall()
 
         configs = [self._row_to_configuration(r) for r in rows]
 
@@ -889,7 +889,7 @@ class ArcFusionDB:
             SELECT * FROM component_configurations
             WHERE component_ids LIKE ?
             ORDER BY config_score DESC
-        """, (f'%"{component_id}"%',)).fetchall() or []
+        """, (f'%"{component_id}"%',)).fetchall()
         return [self._row_to_configuration(r) for r in rows]
 
     # -------------------------------------------------------------------------
