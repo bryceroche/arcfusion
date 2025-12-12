@@ -38,6 +38,13 @@ DEFAULT_BATCH_SIZE = 8
 DEFAULT_MAX_STEPS = 100
 DEFAULT_LEARNING_RATE = 1e-4
 
+# Perplexity calculation constants
+MAX_LOSS_FOR_PERPLEXITY = 20.0  # Clamp loss to avoid overflow in exp()
+MAX_PERPLEXITY_FOR_SCORING = 1000.0  # Scale for converting ppl to 0-1 score
+
+# Evaluation constants
+DEFAULT_EVAL_BATCHES = 10  # Number of batches for evaluation
+
 
 @dataclass
 class ModelConfig:
@@ -269,7 +276,7 @@ class TrainingHarness:
 
                 if verbose and step % self.config.eval_interval == 0:
                     avg_loss = running_loss / step
-                    print(f"  Step {step}: loss={avg_loss:.4f}, ppl={math.exp(min(avg_loss, 10)):.2f}")
+                    print(f"  Step {step}: loss={avg_loss:.4f}, ppl={math.exp(min(avg_loss, MAX_LOSS_FOR_PERPLEXITY)):.2f}")
 
             final_loss = running_loss / max(step, 1)
             return final_loss, step, None
@@ -287,7 +294,7 @@ class BenchmarkRunner:
     def compute_perplexity(self, loss: float) -> float:
         """Compute perplexity from cross-entropy loss."""
         # Clamp to avoid overflow
-        return math.exp(min(loss, 20))
+        return math.exp(min(loss, MAX_LOSS_FOR_PERPLEXITY))
 
     def run_benchmarks(
         self,
@@ -343,7 +350,7 @@ class BenchmarkRunner:
                 num_batches += 1
 
                 # Limit eval batches
-                if num_batches >= 10:
+                if num_batches >= DEFAULT_EVAL_BATCHES:
                     break
 
         avg_loss = total_loss / max(num_batches, 1)
@@ -536,8 +543,7 @@ class ValidationPipeline:
         # Convert perplexity to a 0-1 score (lower perplexity = higher score)
         # Perplexity of ~1 is perfect, >100 is bad
         # Use log scale: score = 1 - (log(ppl) / log(max_ppl))
-        max_ppl = 1000.0
-        ppl_score = max(0.0, 1.0 - math.log(result.perplexity + 1) / math.log(max_ppl))
+        ppl_score = max(0.0, 1.0 - math.log(result.perplexity + 1) / math.log(MAX_PERPLEXITY_FOR_SCORING))
 
         for comp in components:
             # Blend old score with new observation

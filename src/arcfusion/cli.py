@@ -26,6 +26,12 @@ SEPARATOR = "-" * SEPARATOR_WIDTH
 SECTION_SEPARATOR = "=" * SEPARATOR_WIDTH
 
 
+def _cli_error(msg: str, exit_code: int = 1) -> None:
+    """Print error message and exit."""
+    print(f"[ERROR] {msg}")
+    sys.exit(exit_code)
+
+
 def _build_dream_kwargs(args: argparse.Namespace) -> dict:
     """Build kwargs dict for dream/compose strategies from CLI args."""
     kwargs = {}
@@ -310,8 +316,7 @@ def _config_list(db: ArcFusionDB, args: argparse.Namespace) -> None:
 def _config_extract(db: ArcFusionDB, composer: EngineComposer, args: argparse.Namespace) -> None:
     """Extract configurations from an engine."""
     if not args.engine:
-        print("[ERROR] --engine required for extract action")
-        sys.exit(1)
+        _cli_error("--engine required for extract action")
 
     configs = composer.extract_configurations_from_engine(
         args.engine,
@@ -340,13 +345,11 @@ def _config_extract(db: ArcFusionDB, composer: EngineComposer, args: argparse.Na
 def _config_show(db: ArcFusionDB, args: argparse.Namespace) -> None:
     """Show details of a configuration."""
     if not args.config_id:
-        print("[ERROR] --id required for show action")
-        sys.exit(1)
+        _cli_error("--id required for show action")
 
     config = db.get_configuration(args.config_id)
     if not config:
-        print(f"Configuration '{args.config_id}' not found.")
-        sys.exit(1)
+        _cli_error(f"Configuration '{args.config_id}' not found")
 
     print(f"Configuration: {config.name}")
     print(f"  ID: {config.config_id}")
@@ -380,13 +383,11 @@ def cmd_config(args: argparse.Namespace) -> None:
 def _benchmark_add(db: ArcFusionDB, args: argparse.Namespace) -> None:
     """Add a benchmark result."""
     if not args.engine or not args.name or args.score is None:
-        print("[ERROR] --engine, --name, and --score required for add action")
-        sys.exit(1)
+        _cli_error("--engine, --name, and --score required for add action")
 
     engine = db.get_engine_by_name(args.engine)
     if not engine:
-        print(f"[ERROR] Engine '{args.engine}' not found")
-        sys.exit(1)
+        _cli_error(f"Engine '{args.engine}' not found")
 
     # Parse parameters if provided
     parameters = {}
@@ -421,8 +422,7 @@ def _benchmark_add(db: ArcFusionDB, args: argparse.Namespace) -> None:
 def _benchmark_leaderboard(db: ArcFusionDB, args: argparse.Namespace) -> None:
     """Show benchmark leaderboard."""
     if not args.name:
-        print("[ERROR] --name required for leaderboard action")
-        sys.exit(1)
+        _cli_error("--name required for leaderboard action")
 
     higher_better = not args.lower_better
     results = db.get_benchmark_leaderboard(
@@ -445,13 +445,11 @@ def _benchmark_leaderboard(db: ArcFusionDB, args: argparse.Namespace) -> None:
 def _benchmark_show(db: ArcFusionDB, args: argparse.Namespace) -> None:
     """Show benchmark results for an engine."""
     if not args.engine:
-        print("[ERROR] --engine required for show action")
-        sys.exit(1)
+        _cli_error("--engine required for show action")
 
     engine = db.get_engine_by_name(args.engine)
     if not engine:
-        print(f"[ERROR] Engine '{args.engine}' not found")
-        sys.exit(1)
+        _cli_error(f"Engine '{args.engine}' not found")
 
     results = db.get_engine_benchmarks(engine.engine_id)
     if not results:
@@ -471,22 +469,18 @@ def _benchmark_show(db: ArcFusionDB, args: argparse.Namespace) -> None:
 def _benchmark_compare(db: ArcFusionDB, args: argparse.Namespace) -> None:
     """Compare benchmark results between two engines."""
     if not args.engine or not args.engine2:
-        print("[ERROR] --engine and --engine2 required for compare action")
-        sys.exit(1)
+        _cli_error("--engine and --engine2 required for compare action")
 
     if args.engine.lower() == args.engine2.lower():
-        print("[ERROR] Cannot compare an engine with itself")
-        sys.exit(1)
+        _cli_error("Cannot compare an engine with itself")
 
     engine1 = db.get_engine_by_name(args.engine)
     engine2 = db.get_engine_by_name(args.engine2)
 
     if not engine1:
-        print(f"[ERROR] Engine '{args.engine}' not found")
-        sys.exit(1)
+        _cli_error(f"Engine '{args.engine}' not found")
     if not engine2:
-        print(f"[ERROR] Engine '{args.engine2}' not found")
-        sys.exit(1)
+        _cli_error(f"Engine '{args.engine2}' not found")
 
     comparison = db.compare_engines([engine1.engine_id, engine2.engine_id])
     if not comparison:
@@ -551,14 +545,12 @@ def cmd_generate(args: argparse.Namespace) -> None:
         try:
             result = gen.generate_from_dream(args.strategy, name=args.name, **kwargs)
         except ValueError as e:
-            print(f"[ERROR] Code generation failed: {e}")
-            sys.exit(1)
+            _cli_error(f"Code generation failed: {e}")
 
         # Validate
         valid, error = result.validate_syntax()
         if not valid:
-            print(f"[ERROR] Generated code has syntax error: {error}")
-            sys.exit(1)
+            _cli_error(f"Generated code has syntax error: {error}")
 
         # Output
         if args.output:
@@ -576,8 +568,7 @@ def cmd_generate(args: argparse.Namespace) -> None:
 def cmd_validate(args: argparse.Namespace) -> None:
     """Validate a dreamed architecture by building, training, and benchmarking."""
     if not HAS_VALIDATOR:
-        print("[ERROR] Validator requires PyTorch. Install with: pip install torch")
-        sys.exit(1)
+        _cli_error("Validator requires PyTorch. Install with: pip install torch")
 
     with ArcFusionDB(args.db) as db:
         gen = CodeGenerator(db)
@@ -588,8 +579,7 @@ def cmd_validate(args: argparse.Namespace) -> None:
         try:
             generated = gen.generate_from_dream(args.strategy, name=args.name, **kwargs)
         except ValueError as e:
-            print(f"[ERROR] Dream failed: {e}")
-            sys.exit(1)
+            _cli_error(f"Dream failed: {e}")
 
         print(f"Generated: {generated.name} with {generated.num_components} components")
         for name in generated.component_names:

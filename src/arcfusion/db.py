@@ -40,7 +40,7 @@ class Component:
     is_causal: bool = False     # Enforces causal/autoregressive constraint
     math_operations: list = field(default_factory=list)  # ["matmul", "softmax", "layernorm", "gelu"]
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if not self.component_id:
             content = f"{self.name}{json.dumps(self.interface_in, sort_keys=True)}{json.dumps(self.interface_out, sort_keys=True)}"
             self.component_id = hashlib.sha256(content.encode()).hexdigest()[:12]
@@ -60,7 +60,7 @@ class Engine:
     engine_id: str = ""
     component_ids: list = field(default_factory=list)
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if not self.engine_id:
             self.engine_id = hashlib.sha256(self.name.encode()).hexdigest()[:12]
 
@@ -96,7 +96,7 @@ class BenchmarkResult:
     benchmark_id: str = ""
     created_at: str = ""
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if not self.benchmark_id:
             content = f"{self.engine_id}{self.benchmark_name}{json.dumps(self.parameters, sort_keys=True)}"
             self.benchmark_id = hashlib.sha256(content.encode()).hexdigest()[:12]
@@ -115,7 +115,7 @@ class DreamedEngine:
     dream_id: str = ""
     created_at: str = ""
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if not self.dream_id:
             content = f"{self.strategy}{json.dumps(self.component_ids, sort_keys=True)}{self.estimated_score}"
             self.dream_id = hashlib.sha256(content.encode()).hexdigest()[:12]
@@ -136,7 +136,7 @@ class ComponentConfiguration:
     config_id: str = ""
     created_at: str = ""
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if not self.config_id:
             content = f"{self.name}{json.dumps(self.component_ids, sort_keys=True)}"
             self.config_id = hashlib.sha256(content.encode()).hexdigest()[:12]
