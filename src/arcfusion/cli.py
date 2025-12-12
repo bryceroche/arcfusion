@@ -119,18 +119,16 @@ def cmd_dream(args: argparse.Namespace) -> None:
         try:
             components, score = composer.dream(args.strategy, **kwargs)
         except ValueError as e:
-            print(f"[ERROR] {e}")
-            sys.exit(1)
+            _cli_error(str(e))
 
         # Check for failure (score -1 indicates composition failed)
         if score < 0 or not components:
-            print(f"[ERROR] Dream composition failed for strategy '{args.strategy}'")
+            msg = f"Dream composition failed for strategy '{args.strategy}'"
             if args.strategy == "crossover":
-                print(f"  Check that engines '{args.engine1}' and '{args.engine2}' exist")
-                print(f"  Run: arcfusion list engines")
+                msg += f"\n  Check that engines '{args.engine1}' and '{args.engine2}' exist"
             elif args.strategy == "mutate":
-                print(f"  Check that engine '{args.engine}' exists")
-            sys.exit(1)
+                msg += f"\n  Check that engine '{args.engine}' exists"
+            _cli_error(msg)
 
         print(f"Strategy: {args.strategy}")
         print(f"Estimated score: {score:.2f}")

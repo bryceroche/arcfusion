@@ -350,14 +350,14 @@ class EngineComposer:
         if not all_parent_comps:
             return []
 
-        # Group by category
+        # Group by category (deduplicate by component_id)
         by_category = {}
+        seen_ids = set()
         for comp in all_parent_comps:
-            cat = get_component_category(comp)
-            if cat not in by_category:
-                by_category[cat] = []
-            if comp not in by_category[cat]:
-                by_category[cat].append(comp)
+            if comp.component_id not in seen_ids:
+                seen_ids.add(comp.component_id)
+                cat = get_component_category(comp)
+                by_category.setdefault(cat, []).append(comp)
 
         # For each category that exists, randomly pick from available components
         selected = []
