@@ -238,7 +238,7 @@ class ComponentDeduplicator:
                 # (if all are variants of each other, none will be filtered)
                 if len(filtered_group) > 1:
                     group = filtered_group
-                elif len(filtered_group) == 0:
+                elif not filtered_group:
                     # All pairs are variants - skip this group
                     continue
 

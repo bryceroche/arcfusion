@@ -673,8 +673,8 @@ class EngineComposer:
 
         # Interface flow bonus - components should connect well in sequence
         interface_bonus = 0.0
-        for i in range(len(components) - 1):
-            compatible, score = interfaces_compatible(components[i], components[i + 1])
+        for comp, next_comp in zip(components, components[1:]):
+            compatible, score = interfaces_compatible(comp, next_comp)
             if compatible:
                 interface_bonus += score * 0.05
 
