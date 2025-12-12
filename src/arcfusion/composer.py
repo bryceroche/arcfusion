@@ -54,9 +54,6 @@ REQUIRED_CATEGORY_GROUPS = [
     {'attention', 'structure'},  # Core processing - attention or encoder/decoder block
 ]
 
-# Categories to avoid over-representing (training components don't make an arch)
-DISCOURAGED_HEAVY_CATEGORIES = ('training',)
-
 
 def _is_start_component(comp: 'Component') -> bool:
     """Check if component is suitable for starting an architecture."""
@@ -311,11 +308,14 @@ class EngineComposer:
             compatible = self.get_interface_compatible_components(
                 current.component_id, min_score=MIN_COMPATIBILITY_SCORE
             )
-            candidates = [
-                (self.db.get_component(cid), score)
-                for cid, score in compatible
-                if cid not in used_ids and not _is_singleton_conflict(self.db.get_component(cid), used_categories)
-            ]
+            # Build candidates list (avoid double db lookup)
+            candidates = []
+            for cid, score in compatible:
+                if cid in used_ids:
+                    continue
+                comp = self.db.get_component(cid)
+                if not _is_singleton_conflict(comp, used_categories):
+                    candidates.append((comp, score))
 
             if not candidates:
                 # Try to find any unused component that fits
@@ -326,11 +326,14 @@ class EngineComposer:
                 diverse = [c for c in unused if get_component_category(c) not in used_categories]
                 if diverse:
                     if temperature > 0:
+                        # Sort by score, then sample from top_k
+                        diverse.sort(key=lambda c: c.usefulness_score, reverse=True)
                         current = random.choice(diverse[:top_k])
                     else:
                         current = max(diverse, key=lambda c: c.usefulness_score)
                 elif unused:
                     if temperature > 0:
+                        unused.sort(key=lambda c: c.usefulness_score, reverse=True)
                         current = random.choice(unused[:top_k])
                     else:
                         current = max(unused, key=lambda c: c.usefulness_score)
@@ -399,11 +402,14 @@ class EngineComposer:
             compatible = self.get_interface_compatible_components(
                 current.component_id, min_score=MIN_RANDOM_COMPATIBILITY
             )
-            candidates = [
-                (self.db.get_component(cid), score)
-                for cid, score in compatible
-                if cid not in used_ids and not _is_singleton_conflict(self.db.get_component(cid), used_categories)
-            ]
+            # Build candidates list (avoid double db lookup)
+            candidates = []
+            for cid, score in compatible:
+                if cid in used_ids:
+                    continue
+                comp = self.db.get_component(cid)
+                if not _is_singleton_conflict(comp, used_categories):
+                    candidates.append((comp, score))
 
             if not candidates:
                 unused = [c for c in all_components
