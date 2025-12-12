@@ -78,7 +78,7 @@ def _check_architecture_validity(used_categories: set) -> list[set]:
 def _is_training_only(used_categories: set) -> bool:
     """Check if architecture is only training components (invalid)."""
     non_training = used_categories - {'training'}
-    return len(non_training) == 0 or non_training == {'output'}
+    return not non_training or non_training == {'output'}
 
 
 def normalize_shape(shape_str: str) -> str:

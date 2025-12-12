@@ -238,7 +238,7 @@ class ArxivFetcher:
                 stats["failed"] += 1
 
         if verbose:
-            print(f"\n--- Batch Complete ---")
+            print("\n--- Batch Complete ---")
             print(f"Total: {stats['total']}")
             print(f"Processed: {stats['processed']}")
             print(f"Skipped: {stats['skipped']}")

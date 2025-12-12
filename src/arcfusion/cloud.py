@@ -308,7 +308,7 @@ class CloudTrainer:
 
         if verbose:
             if result.success:
-                print(f"\nTraining complete!")
+                print("\nTraining complete!")
                 print(f"  Final loss: {result.final_loss:.4f}")
                 print(f"  Perplexity: {result.perplexity:.2f}")
                 print(f"  Parameters: {result.num_parameters:,}")

@@ -187,7 +187,7 @@ def cmd_show(args: argparse.Namespace) -> None:
 
                 compatible = db.get_compatible_components(comp.component_id, min_score=0.7)
                 if compatible:
-                    print(f"  Compatible with:")
+                    print("  Compatible with:")
                     for cid, score in compatible[:5]:
                         c = db.get_component(cid)
                         if c:
@@ -284,7 +284,7 @@ def cmd_dedup(args: argparse.Namespace) -> None:
             print(f"\n{i}. KEEP: {group.canonical.name}")
             print(f"   (ID: {group.canonical.component_id[:8]}, score: {group.canonical.usefulness_score:.2f}, has_code: {bool(group.canonical.code.strip())})")
             print(f"   Reason: {group.similarity_reason}")
-            print(f"   MERGE:")
+            print("   MERGE:")
             for dup in group.duplicates:
                 print(f"     - {dup.name} ({dup.component_id[:8]}, score: {dup.usefulness_score:.2f})")
 
@@ -500,7 +500,7 @@ def _benchmark_compare(db: ArcFusionDB, args: argparse.Namespace) -> None:
 
     comparison = db.compare_engines([engine1.engine_id, engine2.engine_id])
     if not comparison:
-        print(f"No benchmarks found for these engines")
+        print("No benchmarks found for these engines")
         return
 
     print(f"Comparison: {args.engine} vs {args.engine2}")
@@ -576,7 +576,7 @@ def cmd_generate(args: argparse.Namespace) -> None:
         else:
             print(result.code)
 
-        print(f"\nComponents used:")
+        print("\nComponents used:")
         for name in result.component_names:
             print(f"  - {name}")
 
@@ -653,7 +653,7 @@ def _cmd_validate_cloud(args: argparse.Namespace) -> None:
                 notes="Cloud-validated dreamed architecture via Modal"
             )
             db.add_benchmark(benchmark)
-            print(f"\nStored cloud validation result")
+            print("\nStored cloud validation result")
 
 
 def cmd_validate(args: argparse.Namespace) -> None:
@@ -727,7 +727,7 @@ def cmd_validate(args: argparse.Namespace) -> None:
             print(f"  Training Time: {result.training_time_seconds:.1f}s")
 
             if result.benchmarks:
-                print(f"\nBenchmarks:")
+                print("\nBenchmarks:")
                 for name, score in result.benchmarks.items():
                     print(f"    {name}: {score:.4f}")
 
