@@ -43,8 +43,12 @@ def create_app(db_path: str = DEFAULT_DB_PATH) -> "FastAPI":
         version="0.2.0",
     )
 
-    # Database connection
-    db = ArcFusionDB(db_path)
+    # Store db_path for per-request connections (SQLite threading requirement)
+    app.state.db_path = db_path
+
+    def get_db():
+        """Create a fresh DB connection for each request (SQLite thread safety)."""
+        return ArcFusionDB(app.state.db_path)
 
     # =========================================================================
     # API ENDPOINTS
@@ -53,6 +57,7 @@ def create_app(db_path: str = DEFAULT_DB_PATH) -> "FastAPI":
     @app.get("/api/stats")
     def get_stats():
         """Get database statistics."""
+        db = get_db()
         return db.stats()
 
     @app.get("/api/components")
@@ -62,6 +67,7 @@ def create_app(db_path: str = DEFAULT_DB_PATH) -> "FastAPI":
         limit: int = Query(100, le=500),
     ):
         """List all components with optional filtering."""
+        db = get_db()
         components = db.find_components(search) if search else db.find_components()
 
         results = []
@@ -85,6 +91,7 @@ def create_app(db_path: str = DEFAULT_DB_PATH) -> "FastAPI":
     @app.get("/api/components/{component_id}")
     def get_component(component_id: str):
         """Get detailed component information."""
+        db = get_db()
         comp = db.get_component(component_id)
         if not comp:
             raise HTTPException(status_code=404, detail="Component not found")
@@ -117,6 +124,7 @@ def create_app(db_path: str = DEFAULT_DB_PATH) -> "FastAPI":
     @app.get("/api/engines")
     def list_engines(limit: int = Query(50, le=200)):
         """List all engines/architectures."""
+        db = get_db()
         engines = db.list_engines()
 
         results = []
@@ -135,6 +143,7 @@ def create_app(db_path: str = DEFAULT_DB_PATH) -> "FastAPI":
     @app.get("/api/engines/{engine_id}")
     def get_engine(engine_id: str):
         """Get detailed engine information."""
+        db = get_db()
         engine = db.get_engine(engine_id)
         if not engine:
             raise HTTPException(status_code=404, detail="Engine not found")
@@ -162,6 +171,7 @@ def create_app(db_path: str = DEFAULT_DB_PATH) -> "FastAPI":
     @app.get("/api/relationships")
     def get_relationships(min_score: float = Query(0.7, ge=0, le=1)):
         """Get component relationships for graph visualization."""
+        db = get_db()
         # Get all components first
         components = db.find_components()
         comp_map = {c.component_id: c.name for c in components}
@@ -207,6 +217,7 @@ def create_app(db_path: str = DEFAULT_DB_PATH) -> "FastAPI":
         top_k: int = Query(5, ge=1, le=20),
     ):
         """Dream a new architecture using the composer."""
+        db = get_db()
         composer = EngineComposer(db)
 
         try:
