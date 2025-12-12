@@ -840,30 +840,25 @@ Examples:
 
     args = parser.parse_args()
 
-    if args.command == "init":
-        cmd_init(args)
-    elif args.command == "stats":
-        cmd_stats(args)
-    elif args.command == "list":
-        cmd_list(args)
-    elif args.command == "show":
-        cmd_show(args)
-    elif args.command == "dream":
-        cmd_dream(args)
-    elif args.command == "ingest":
-        cmd_ingest(args)
-    elif args.command == "analyze":
-        cmd_analyze(args)
-    elif args.command == "dedup":
-        cmd_dedup(args)
-    elif args.command == "generate":
-        cmd_generate(args)
-    elif args.command == "config":
-        cmd_config(args)
-    elif args.command == "benchmark":
-        cmd_benchmark(args)
-    elif args.command == "validate":
-        cmd_validate(args)
+    # Command dispatch table
+    commands = {
+        "init": cmd_init,
+        "stats": cmd_stats,
+        "list": cmd_list,
+        "show": cmd_show,
+        "dream": cmd_dream,
+        "ingest": cmd_ingest,
+        "analyze": cmd_analyze,
+        "dedup": cmd_dedup,
+        "generate": cmd_generate,
+        "config": cmd_config,
+        "benchmark": cmd_benchmark,
+        "validate": cmd_validate,
+    }
+
+    cmd_fn = commands.get(args.command)
+    if cmd_fn:
+        cmd_fn(args)
     else:
         parser.print_help()
         sys.exit(1)
