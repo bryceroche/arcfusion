@@ -18,6 +18,18 @@ from typing import Any, Optional
 from pathlib import Path
 
 
+def _to_json(obj: Any) -> Optional[str]:
+    """Convert object to JSON string, returning None for empty/falsy values."""
+    if not obj:
+        return None
+    return json.dumps(obj)
+
+
+def _bool_to_int(value: bool) -> int:
+    """Convert boolean to integer for SQLite storage."""
+    return 1 if value else 0
+
+
 @dataclass
 class Component:
     """A reusable ML component (attention head, FFN layer, etc.)"""
@@ -314,13 +326,13 @@ class ArcFusionDB:
             comp.usefulness_score,
             comp.source_paper_id or None,
             comp.introduced_year or None,
-            json.dumps(comp.hyperparameters) if comp.hyperparameters else None,
+            _to_json(comp.hyperparameters),
             comp.time_complexity or None,
             comp.space_complexity or None,
             comp.flops_formula or None,
-            1 if comp.is_parallelizable else 0,
-            1 if comp.is_causal else 0,
-            json.dumps(comp.math_operations) if comp.math_operations else None,
+            _bool_to_int(comp.is_parallelizable),
+            _bool_to_int(comp.is_causal),
+            _to_json(comp.math_operations),
         ))
         self.conn.commit()
         return comp.component_id
@@ -407,10 +419,10 @@ class ArcFusionDB:
             params.append(time_complexity)
         if is_parallelizable is not None:
             query += " AND is_parallelizable = ?"
-            params.append(1 if is_parallelizable else 0)
+            params.append(_bool_to_int(is_parallelizable))
         if is_causal is not None:
             query += " AND is_causal = ?"
-            params.append(1 if is_causal else 0)
+            params.append(_bool_to_int(is_causal))
         query += " ORDER BY usefulness_score DESC"
 
         rows = self.conn.execute(query, params).fetchall()
@@ -709,10 +721,10 @@ class ArcFusionDB:
         """, (
             dream.dream_id,
             dream.strategy,
-            json.dumps(dream.parent_engine_ids) if dream.parent_engine_ids else None,
+            _to_json(dream.parent_engine_ids),
             json.dumps(dream.component_ids),
             dream.estimated_score,
-            1 if dream.validated else 0,
+            _bool_to_int(dream.validated),
             dream.actual_score,
             dream.notes
         ))
@@ -747,7 +759,7 @@ class ArcFusionDB:
             params.append(strategy)
         if validated is not None:
             query += " AND validated = ?"
-            params.append(1 if validated else 0)
+            params.append(_bool_to_int(validated))
         query += " ORDER BY estimated_score DESC LIMIT ?"
         params.append(limit)
 
@@ -794,7 +806,7 @@ class ArcFusionDB:
             config.source_engine_id or None,
             config.config_score,
             config.usage_count,
-            1 if config.validated else 0
+            _bool_to_int(config.validated)
         ))
         self.conn.commit()
         return config.config_id
@@ -838,7 +850,7 @@ class ArcFusionDB:
             params.append(min_score)
         if validated is not None:
             query += " AND validated = ?"
-            params.append(1 if validated else 0)
+            params.append(_bool_to_int(validated))
 
         query += " ORDER BY config_score DESC, usage_count DESC"
         rows = self.conn.execute(query, params).fetchall()

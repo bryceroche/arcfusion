@@ -12,6 +12,20 @@ from collections import defaultdict
 from dataclasses import dataclass
 from .db import ArcFusionDB, Component, Engine
 
+# Similarity scoring weights
+WEIGHT_SAME_NAME = 0.6       # Exact normalized name match
+WEIGHT_SUBSTRING = 0.4       # One name is substring of other
+WEIGHT_SEMANTIC_HIGH = 0.3   # >80% semantic term overlap
+WEIGHT_SEMANTIC_MOD = 0.15   # >50% semantic term overlap
+WEIGHT_SAME_PAPER = 0.1      # Same source paper
+
+# Semantic overlap thresholds
+SEMANTIC_OVERLAP_HIGH = 0.8
+SEMANTIC_OVERLAP_MODERATE = 0.5
+
+# Default deduplication threshold
+DEFAULT_DEDUP_THRESHOLD = 0.5
+
 
 @dataclass
 class DuplicateGroup:
@@ -151,10 +165,10 @@ def calculate_similarity(comp1: Component, comp2: Component) -> tuple[float, str
     norm2 = normalize_component_name(comp2.name)
 
     if norm1 == norm2:
-        score += 0.6
+        score += WEIGHT_SAME_NAME
         reasons.append("same normalized name")
     elif norm1 in norm2 or norm2 in norm1:
-        score += 0.4
+        score += WEIGHT_SUBSTRING
         reasons.append("substring match")
 
     # Semantic signature overlap
@@ -163,16 +177,16 @@ def calculate_similarity(comp1: Component, comp2: Component) -> tuple[float, str
 
     if sig1 and sig2:
         overlap = len(sig1 & sig2) / max(len(sig1 | sig2), 1)
-        if overlap > 0.8:
-            score += 0.3
+        if overlap > SEMANTIC_OVERLAP_HIGH:
+            score += WEIGHT_SEMANTIC_HIGH
             reasons.append(f"high semantic overlap ({overlap:.0%})")
-        elif overlap > 0.5:
-            score += 0.15
+        elif overlap > SEMANTIC_OVERLAP_MODERATE:
+            score += WEIGHT_SEMANTIC_MOD
             reasons.append(f"moderate semantic overlap ({overlap:.0%})")
 
     # Same source paper
     if comp1.source_paper_id and comp1.source_paper_id == comp2.source_paper_id:
-        score += 0.1
+        score += WEIGHT_SAME_PAPER
         reasons.append("same source paper")
 
     return min(score, 1.0), "; ".join(reasons) if reasons else "no match"
@@ -184,7 +198,7 @@ class ComponentDeduplicator:
     def __init__(self, db: ArcFusionDB):
         self.db = db
 
-    def find_duplicates(self, threshold: float = 0.5) -> list[DuplicateGroup]:
+    def find_duplicates(self, threshold: float = DEFAULT_DEDUP_THRESHOLD) -> list[DuplicateGroup]:
         """
         Find groups of duplicate components.
 
@@ -372,7 +386,7 @@ class ComponentDeduplicator:
         self.db.conn.commit()
         return result
 
-    def merge_all(self, threshold: float = 0.5, dry_run: bool = True) -> list[dict]:
+    def merge_all(self, threshold: float = DEFAULT_DEDUP_THRESHOLD, dry_run: bool = True) -> list[dict]:
         """
         Find and merge all duplicate groups.
 
