@@ -27,6 +27,13 @@ try:
 except ImportError:
     HAS_CLOUD = False
 
+# Conditional import for web UI (requires fastapi/uvicorn)
+try:
+    from .web import run_server, HAS_FASTAPI
+    HAS_WEB = HAS_FASTAPI
+except ImportError:
+    HAS_WEB = False
+
 # CLI display constants
 SEPARATOR_WIDTH = 60
 SEPARATOR = "-" * SEPARATOR_WIDTH
@@ -656,6 +663,18 @@ def _cmd_validate_cloud(args: argparse.Namespace) -> None:
             print("\nStored cloud validation result")
 
 
+def cmd_web(args: argparse.Namespace) -> None:
+    """Start the web UI server."""
+    if not HAS_WEB:
+        _cli_error("Web UI requires FastAPI. Install with: pip install 'arcfusion[web]'")
+
+    print(f"Starting ArcFusion Web UI...")
+    print(f"  Database: {args.db}")
+    print(f"  URL: http://{args.host}:{args.port}")
+    print("\nPress Ctrl+C to stop.\n")
+    run_server(host=args.host, port=args.port, db_path=args.db)
+
+
 def cmd_validate(args: argparse.Namespace) -> None:
     """Validate a dreamed architecture by building, training, and benchmarking."""
     # Check for cloud mode
@@ -772,6 +791,7 @@ def main() -> None:
     - ingest: Import papers from arXiv
     - analyze: Deep LLM-powered component extraction (requires ANTHROPIC_API_KEY)
     - dedup: Find and merge duplicate components
+    - web: Start interactive web UI (requires FastAPI)
     """
     parser = argparse.ArgumentParser(
         description="ArcFusion - ML Architecture Component Database",
@@ -928,6 +948,16 @@ Examples:
     val_parser.add_argument("--store", action="store_true", help="Store benchmark results in database")
     val_parser.add_argument("--cloud", action="store_true", help="Run training on cloud GPU via Modal")
 
+    # web (web UI server)
+    web_parser = subparsers.add_parser(
+        "web",
+        help="Start the web UI server (requires FastAPI)",
+        description="Start an interactive web interface to browse components, engines, "
+                    "view relationship graphs, and dream new architectures."
+    )
+    web_parser.add_argument("--host", default="127.0.0.1", help="Host to bind to (default: 127.0.0.1)")
+    web_parser.add_argument("--port", "-p", type=int, default=8000, help="Port to listen on (default: 8000)")
+
     args = parser.parse_args()
 
     # Command dispatch table
@@ -944,6 +974,7 @@ Examples:
         "config": cmd_config,
         "benchmark": cmd_benchmark,
         "validate": cmd_validate,
+        "web": cmd_web,
     }
 
     cmd_fn = commands.get(args.command)

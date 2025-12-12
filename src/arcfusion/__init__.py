@@ -77,6 +77,15 @@ except ImportError:
     CloudConfig = None
     CloudResult = None
 
+# Optional Web UI (requires fastapi/uvicorn)
+try:
+    from .web import create_app, run_server, HAS_FASTAPI
+    HAS_WEB = HAS_FASTAPI
+except ImportError:
+    HAS_WEB = False
+    create_app = None
+    run_server = None
+
 __version__ = "0.2.0"
 __all__ = [
     # Database
@@ -125,6 +134,10 @@ __all__ = [
     "CloudConfig",
     "CloudResult",
     "HAS_CLOUD",
+    # Web UI (optional)
+    "create_app",
+    "run_server",
+    "HAS_WEB",
     # Seeding
     "seed_transformers",
     "seed_modern_architectures",
