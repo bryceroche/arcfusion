@@ -14,6 +14,8 @@ from .db import (
     BenchmarkResult,
     DreamedEngine,
     ComponentConfiguration,
+    Recipe,
+    RecipeAdjustment,
 )
 from .composer import EngineComposer
 from .decomposer import PaperDecomposer
@@ -67,6 +69,9 @@ __all__ = [
     "ProcessedPaper",
     "BenchmarkResult",
     "DreamedEngine",
+    # Recipe system (Composer → ML Agent handoff)
+    "Recipe",
+    "RecipeAdjustment",
     # Composition
     "EngineComposer",
     "CodeGenerator",

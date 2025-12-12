@@ -3,7 +3,7 @@
 **Product Manager**: Claude (AI Agent)
 **Reporting To**: Bryce Roche
 **Project Status**: Active Development
-**Last Updated**: 2025-12-11
+**Last Updated**: 2025-12-12
 
 ---
 
@@ -13,7 +13,7 @@ Systematically harvest ML architecture knowledge from arXiv papers to build the 
 
 ---
 
-## Current State (Updated: 2025-12-11)
+## Current State (Updated: 2025-12-12)
 
 ### Database Stats
 | Metric | Value |
@@ -22,21 +22,43 @@ Systematically harvest ML architecture knowledge from arXiv papers to build the 
 | Engines | 211 |
 | Relationships | 215 |
 | Papers Processed | 203 |
+| Recipes | 0 (new) |
 | Benchmarks | 0 |
 
 ### What We Have (Completed)
+
+**Core Pipeline:**
 - **21 components** - MultiHeadAttention, Embedding, LayerNorm, RMSNorm, FeedForward, RotaryEmbedding, ResidualConnection, SelectiveSSM, SwiGLU, GroupedQueryAttention, SoftmaxOutput, RetentionHead, CausalMask, TimeMixing, ChannelMixing, Activation, Gating, Convolution, Linear_Attention, Dropout, Normalization
 - **211 engines** including landmark papers: Attention Is All You Need, BERT, GPT-3, Mamba, LLaMA 2, Mistral 7B, FlashAttention, ViT, Swin, Mixtral, Griffin, etc.
 - **arXiv Fetcher** (`src/arcfusion/fetcher.py`) - Full paper fetching pipeline
 - **CLI `arcfusion ingest`** - Batch ingestion command with search/ID modes
-- **Composer system** with 4 strategies (greedy, random, mutate, crossover)
+
+**Composer System:**
+- 4 dream strategies: greedy, random, mutate, crossover
+- **NEW: Recipe system** - Composer → ML Agent handoff format with:
+  - Ordered component IDs
+  - Assembly instructions (connections, residuals, shapes, categories)
+  - Strategy metadata for reproducibility
+- **NEW: RecipeAdjustment tracking** - Records ML Agent modifications during training
+
+**Validation Pipeline:**
+- **`src/arcfusion/validator.py`** - Auto-validation of dreamed architectures
+- Builds PyTorch models from generated code
+- Trains on synthetic data with configurable hyperparameters
+- Computes perplexity and benchmarks
+- **Verified working**: Transformer builds and trains end-to-end from 7 DB components (1M params)
+
+**Code Generation:**
+- **`src/arcfusion/codegen.py`** - Generates runnable PyTorch nn.Module code
+- Handles all component categories: embedding, attention, layer, position, output
+- Auto-generates residual connections and proper shape handling
 
 ### What We Need (Next Phase)
-- [ ] Run LLM analyzer on landmark papers to validate quality
-- [ ] Benchmark extraction from papers
-- [ ] Agent coordination for parallel processing
+- [ ] ML Agent implementation (recipe executor with adjustment tracking)
+- [ ] Cloud training integration (Groq/Modal/Lambda)
+- [ ] Scale up paper ingestion (target: 500+ papers)
 
-### New: LLM-Powered Deep Analysis
+### LLM-Powered Deep Analysis
 - **`src/arcfusion/analyzer.py`** - Claude-powered paper analysis
 - Extracts specific component variants (not generic categories)
 - Captures: interfaces, hyperparameters, complexity, math ops, code sketches
@@ -179,26 +201,23 @@ for paper in search.results():
 
 ## Session Log
 
-### 2025-12-11 - Phase 1 Complete
-- Created project_brief.md
-- Analyzed full codebase structure
-- Implemented `src/arcfusion/fetcher.py` with ArxivFetcher class
-- Added `arcfusion ingest` CLI command
-- Ingested 203 papers including landmark architectures:
-  - Attention Is All You Need (1706.03762)
-  - BERT (1810.04805)
-  - GPT-3 / Language Models are Few-Shot Learners (2005.14165)
-  - Mamba (2312.00752)
-  - LLaMA 2 (2307.09288)
-  - Mistral 7B (2310.06825)
-  - FlashAttention (2205.14135)
-  - ViT (2010.11929)
-  - Swin Transformer (2103.14030)
-  - Mixtral of Experts (2401.04088)
-  - Griffin (2402.19427)
-  - And 190+ more research papers
-- Discovered 6 new component categories through paper analysis
-- Built 215 component-to-component relationships
+### 2025-12-12 - Recipe System & Validation Complete
+- **Recipe dataclass** - Composer → ML Agent handoff format with assembly instructions
+- **RecipeAdjustment** - Tracks ML Agent modifications during training
+- **DB tables** - recipes, recipe_adjustments with full CRUD operations
+- **Composer.create_recipe()** - Generates recipes from any dream strategy
+- **Validation pipeline working** - Transformer builds and trains from 7 DB components
+- Tests: 199 tests passing
+- Closes: arcfusion-p9w, arcfusion-9c9
+- Unblocks: arcfusion-a1s (ML Agent implementation)
+
+### 2025-12-11 - Validation Pipeline
+- Created `src/arcfusion/validator.py` - Auto-validation of dreamed architectures
+- ModelBuilder compiles generated code into PyTorch models
+- TrainingHarness trains models on synthetic data
+- BenchmarkRunner computes perplexity and metrics
+- Fixed codegen embedding/output handling for vocab_size
+- Tests: 183 tests passing
 
 ### 2025-12-11 - LLM Analyzer Complete
 - Created `src/arcfusion/analyzer.py` - Claude-powered deep paper analysis
@@ -211,15 +230,24 @@ for paper in search.results():
 - Tests: 32 tests passing (9 new analyzer tests)
 - Optional dependency: `pip install 'arcfusion[llm]'` for anthropic package
 
+### 2025-12-11 - Phase 1 Complete
+- Created project_brief.md
+- Analyzed full codebase structure
+- Implemented `src/arcfusion/fetcher.py` with ArxivFetcher class
+- Added `arcfusion ingest` CLI command
+- Ingested 203 papers including landmark architectures
+- Discovered 6 new component categories through paper analysis
+- Built 215 component-to-component relationships
+
 ---
 
 ## Next Actions
 
-1. **Test LLM analyzer** - Run `arcfusion analyze --ids 2312.00752 1706.03762` with ANTHROPIC_API_KEY to validate component extraction quality
-2. **More papers** - Continue ingestion to hit 500+ target
-3. **Test composer** - Validate that enriched DB improves dream quality
-4. **Benchmark extraction** - Parse performance metrics from papers
-5. **PDF extraction** - Add pymupdf for full-text analysis (deeper than abstracts)
+1. **ML Agent implementation** - Execute recipes with modification tracking (arcfusion-a1s)
+2. **Cloud training integration** - Groq/Modal/Lambda for auto-pipeline (arcfusion-zzp)
+3. **Scale up paper ingestion** - Hit 500+ papers target (arcfusion-xol)
+4. **Component granularity** - Ensure distinct, trainable recipes (arcfusion-wbi)
+5. **Test LLM analyzer** - Run on landmark papers to validate extraction quality
 
 ---
 
@@ -246,8 +274,45 @@ arcfusion analyze --ids 1810.04805 --min-confidence 0.8  # BERT
 # Dream up new architectures
 arcfusion dream greedy --start MultiHeadAttention
 arcfusion dream crossover --engine1 Transformer --engine2 Mamba
+
+# Generate code from dreamed architecture
+arcfusion dream greedy --codegen --output dreamed_arch.py
+```
+
+## Python API - Recipe System
+
+```python
+from arcfusion import ArcFusionDB, Recipe, RecipeAdjustment
+from arcfusion.composer import EngineComposer
+
+# Create a recipe from dreamed components
+db = ArcFusionDB("arcfusion.db")
+composer = EngineComposer(db)
+
+# Dream and create recipe with assembly instructions
+recipe = composer.create_recipe(
+    name="NovelTransformer",
+    strategy="crossover",
+    engine1_name="Transformer",
+    engine2_name="Mamba"
+)
+
+# Recipe contains everything ML Agent needs
+print(recipe.component_ids)  # Ordered list
+print(recipe.assembly)       # connections, residuals, shapes, notes
+print(recipe.strategy)       # How it was created
+
+# Record adjustments made during training
+adjustment = RecipeAdjustment(
+    recipe_id=recipe.recipe_id,
+    adjustment_type="shape_fix",
+    original_value="d_model=512",
+    adjusted_value="d_model=128",
+    reason="Reduced for memory constraints"
+)
+db.add_adjustment(adjustment)
 ```
 
 ---
 
-*Phase 1 complete. Ready for Phase 2: Scale & Quality.*
+*Validation pipeline complete. Recipe system ready. Next: ML Agent implementation.*
