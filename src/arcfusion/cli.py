@@ -130,25 +130,49 @@ def cmd_dream(args: argparse.Namespace) -> None:
         composer = EngineComposer(db)
         kwargs = _build_dream_kwargs(args)
 
-        try:
-            components, score = composer.dream(args.strategy, **kwargs)
-        except ValueError as e:
-            _cli_error(str(e))
+        # Use create_recipe if saving, otherwise just dream
+        if getattr(args, 'save', False):
+            recipe_name = getattr(args, 'name', None) or f"Dream_{args.strategy}"
+            try:
+                recipe = composer.create_recipe(
+                    name=recipe_name,
+                    strategy=args.strategy,
+                    save_to_db=True,
+                    **kwargs
+                )
+            except ValueError as e:
+                _cli_error(str(e))
 
-        # Check for failure (score -1 indicates composition failed)
-        if score < 0 or not components:
-            msg = f"Dream composition failed for strategy '{args.strategy}'"
-            if args.strategy == "crossover":
-                msg += f"\n  Check that engines '{args.engine1}' and '{args.engine2}' exist"
-            elif args.strategy == "mutate":
-                msg += f"\n  Check that engine '{args.engine}' exists"
-            _cli_error(msg)
+            print(f"Strategy: {args.strategy}")
+            print(f"Estimated score: {recipe.estimated_score:.2f}")
+            print(f"Recipe ID: {recipe.recipe_id}")
+            print(f"Components ({len(recipe.component_ids)}):")
+            for cid in recipe.component_ids:
+                comp = db.get_component(cid)
+                if comp:
+                    print(f"  - {comp.name}")
+            print(f"\n✓ Saved recipe '{recipe_name}' to database")
+        else:
+            try:
+                components, score = composer.dream(args.strategy, **kwargs)
+            except ValueError as e:
+                _cli_error(str(e))
 
-        print(f"Strategy: {args.strategy}")
-        print(f"Estimated score: {score:.2f}")
-        print(f"Components ({len(components)}):")
-        for c in components:
-            print(f"  - {c.name}")
+            # Check for failure (score -1 indicates composition failed)
+            if score < 0 or not components:
+                msg = f"Dream composition failed for strategy '{args.strategy}'"
+                if args.strategy == "crossover":
+                    msg += f"\n  Check that engines '{args.engine1}' and '{args.engine2}' exist"
+                elif args.strategy == "mutate":
+                    msg += f"\n  Check that engine '{args.engine}' exists"
+                _cli_error(msg)
+
+            print(f"Strategy: {args.strategy}")
+            print(f"Estimated score: {score:.2f}")
+            print(f"Components ({len(components)}):")
+            for c in components:
+                print(f"  - {c.name}")
+            print("\n(Use --save to persist this recipe)")
 
 
 def cmd_show(args: argparse.Namespace) -> None:
@@ -845,6 +869,8 @@ Examples:
         help="Composition strategy"
     )
     _add_dream_strategy_args(dream_parser)
+    dream_parser.add_argument("--name", "-n", help="Name for the recipe (used with --save)")
+    dream_parser.add_argument("--save", "-s", action="store_true", help="Save recipe to database")
 
     # ingest
     ingest_parser = subparsers.add_parser("ingest", help="Ingest papers from arXiv")
