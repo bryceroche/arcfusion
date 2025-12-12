@@ -48,23 +48,23 @@ DEFAULT_EVAL_BATCHES = 10  # Number of batches for evaluation
 
 def _create_embedding_and_head(
     model: 'nn.Module',
-    inputs: 'torch.Tensor',
-    targets: 'torch.Tensor',
-    device: str
+    device: str,
+    vocab_size: Optional[int] = None
 ) -> tuple:
     """
     Create embedding and LM head layers for models that expect embedded input.
 
     Args:
         model: The model (used to get d_model)
-        inputs: Input tensor (used to determine vocab_size)
-        targets: Target tensor (used to determine output vocab_size)
         device: Device to place layers on
+        vocab_size: Vocabulary size (uses model's vocab_size or default if not provided)
 
     Returns:
         (embedding, lm_head) tuple of nn.Module layers
     """
-    vocab_size = max(inputs.max().item(), targets.max().item()) + 1
+    # Determine vocab_size: explicit param > model attribute > default
+    if vocab_size is None:
+        vocab_size = getattr(model, 'vocab_size', DEFAULT_VOCAB_SIZE)
     d_model = model.d_model if hasattr(model, 'd_model') else DEFAULT_D_MODEL
     embedding = nn.Embedding(vocab_size, d_model).to(device)
     lm_head = nn.Linear(d_model, vocab_size).to(device)
@@ -215,7 +215,8 @@ class TrainingHarness:
         self,
         model: nn.Module,
         dataloader: DataLoader,
-        verbose: bool = False
+        verbose: bool = False,
+        vocab_size: Optional[int] = None
     ) -> tuple[float, int, Optional[str]]:
         """
         Train a model for a limited number of steps.
@@ -224,6 +225,7 @@ class TrainingHarness:
             model: PyTorch model to train
             dataloader: DataLoader with training data
             verbose: Print progress
+            vocab_size: Vocabulary size for embedding/head layers
 
         Returns:
             (final_loss, steps_completed, error)
@@ -269,11 +271,18 @@ class TrainingHarness:
 
                 # Create embedding/head on first batch
                 if embedding is None:
-                    embedding, lm_head = _create_embedding_and_head(model, inputs, targets, device)
+                    embedding, lm_head = _create_embedding_and_head(model, device, vocab_size)
 
                 embedded = embedding(inputs)
                 outputs = model(embedded)
-                logits = lm_head(outputs)
+
+                # Check if model already outputs vocab-sized logits
+                effective_vocab_size = vocab_size or getattr(model, 'vocab_size', lm_head.out_features)
+                if outputs.size(-1) >= effective_vocab_size:
+                    logits = outputs  # Model has built-in LM head
+                else:
+                    logits = lm_head(outputs)
+
                 loss = F.cross_entropy(
                     logits.view(-1, logits.size(-1)),
                     targets.view(-1)
@@ -312,10 +321,17 @@ class BenchmarkRunner:
         self,
         model: nn.Module,
         dataloader: DataLoader,
-        config: TrainingConfig
+        config: TrainingConfig,
+        vocab_size: Optional[int] = None
     ) -> dict:
         """
         Run evaluation benchmarks on a model.
+
+        Args:
+            model: PyTorch model to evaluate
+            dataloader: DataLoader with evaluation data
+            config: Training configuration
+            vocab_size: Vocabulary size for embedding/head layers
 
         Returns:
             Dict of benchmark_name -> score
@@ -339,11 +355,18 @@ class BenchmarkRunner:
 
                 # Create embedding/head on first batch
                 if embedding is None:
-                    embedding, lm_head = _create_embedding_and_head(model, inputs, targets, device)
+                    embedding, lm_head = _create_embedding_and_head(model, device, vocab_size)
 
                 embedded = embedding(inputs)
                 outputs = model(embedded)
-                logits = lm_head(outputs)
+
+                # Check if model already outputs vocab-sized logits
+                effective_vocab_size = vocab_size or getattr(model, 'vocab_size', lm_head.out_features)
+                if outputs.size(-1) >= effective_vocab_size:
+                    logits = outputs  # Model has built-in LM head
+                else:
+                    logits = lm_head(outputs)
+
                 loss = F.cross_entropy(
                     logits.view(-1, logits.size(-1)),
                     targets.view(-1)
@@ -454,7 +477,7 @@ class ValidationPipeline:
 
         start_time = time.time()
         final_loss, steps, train_error = self.harness.train(
-            model, dataloader, verbose=verbose
+            model, dataloader, verbose=verbose, vocab_size=self.model_config.vocab_size
         )
         training_time = time.time() - start_time
 
@@ -479,7 +502,7 @@ class ValidationPipeline:
             print("Running benchmarks...")
 
         benchmarks = self.benchmarker.run_benchmarks(
-            model, dataloader, self.training_config
+            model, dataloader, self.training_config, vocab_size=self.model_config.vocab_size
         )
         result.benchmarks = benchmarks
 

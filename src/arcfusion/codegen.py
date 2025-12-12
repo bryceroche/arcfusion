@@ -190,6 +190,22 @@ def generate_component_class(component: Component, index: int) -> str:
         seq_len = x.size(1)
         return x + self.pe[:, :seq_len]"""
 
+    elif category == 'embedding':
+        init_layers = """
+        self.vocab_size = kwargs.get('vocab_size', 32000)
+        self.max_len = kwargs.get('max_len', 5000)
+        self.token_emb = nn.Embedding(self.vocab_size, d_model)
+        self.pos_emb = nn.Embedding(self.max_len, d_model)
+        self.dropout = nn.Dropout(kwargs.get('dropout', 0.1))"""
+        forward_body = """
+        # Handle both token IDs (2D) and pre-embedded (3D) input
+        if x.dim() == 3:
+            return x  # Already embedded
+        B, T = x.shape
+        tok = self.token_emb(x)
+        pos = self.pos_emb(torch.arange(T, device=x.device))
+        return self.dropout(tok + pos)"""
+
     elif category == 'output':
         init_layers = """
         self.vocab_size = kwargs.get('vocab_size', 32000)
@@ -262,11 +278,16 @@ def generate_architecture_class(
             var_name = f"self.{base_var}_{i}"
 
         var_names.append(var_name)
-        init_lines.append(f"        {var_name} = {class_name}(d_model=d_model)")
 
         # Forward pass - chain components
         # Position components add to input (residual), others replace
         category = get_component_category(comp)
+
+        # Output and embedding components need vocab_size, others just d_model
+        if category in ('output', 'embedding'):
+            init_lines.append(f"        {var_name} = {class_name}(d_model=d_model, vocab_size=vocab_size)")
+        else:
+            init_lines.append(f"        {var_name} = {class_name}(d_model=d_model)")
         if category == 'position':
             forward_lines.append(f"        x = x + {var_name}(x)")
         else:
