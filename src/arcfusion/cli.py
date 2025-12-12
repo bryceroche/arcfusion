@@ -668,7 +668,7 @@ def cmd_web(args: argparse.Namespace) -> None:
     if not HAS_WEB:
         _cli_error("Web UI requires FastAPI. Install with: pip install 'arcfusion[web]'")
 
-    print(f"Starting ArcFusion Web UI...")
+    print("Starting ArcFusion Web UI...")
     print(f"  Database: {args.db}")
     print(f"  URL: http://{args.host}:{args.port}")
     print("\nPress Ctrl+C to stop.\n")
@@ -769,7 +769,7 @@ def cmd_validate(args: argparse.Namespace) -> None:
                         'vocab_size': model_config.vocab_size,
                         'max_steps': training_config.max_steps,
                     },
-                    notes=f"Auto-validated dreamed architecture"
+                    notes="Auto-validated dreamed architecture"
                 )
                 db.add_benchmark(benchmark)
 

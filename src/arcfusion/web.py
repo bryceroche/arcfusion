@@ -12,14 +12,12 @@ Provides:
     - Dream interface for creating new architectures
 """
 
-from pathlib import Path
 from typing import Optional
 
 # Check for FastAPI availability
 try:
     from fastapi import FastAPI, HTTPException, Query
     from fastapi.responses import HTMLResponse
-    from fastapi.staticfiles import StaticFiles
     HAS_FASTAPI = True
 except ImportError:
     HAS_FASTAPI = False

@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import time
 
-from .db import ArcFusionDB, Recipe, RecipeAdjustment, Component
+from .db import ArcFusionDB, Recipe, RecipeAdjustment
 from .codegen import CodeGenerator
 from .composer import EngineComposer
 
