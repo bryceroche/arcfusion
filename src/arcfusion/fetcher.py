@@ -69,6 +69,18 @@ class ArxivFetcher:
             arxiv_id = arxiv_id.rsplit("v", 1)[0]
         return arxiv_id
 
+    def _result_to_paper(self, result: arxiv.Result) -> ArxivPaper:
+        """Convert arxiv API result to ArxivPaper dataclass."""
+        return ArxivPaper(
+            arxiv_id=self._normalize_arxiv_id(result.entry_id),
+            title=result.title,
+            abstract=result.summary,
+            authors=[a.name for a in result.authors],
+            pdf_url=result.pdf_url,
+            published=result.published.isoformat(),
+            categories=result.categories,
+        )
+
     def search(
         self,
         query: str,
@@ -97,15 +109,7 @@ class ArxivFetcher:
         )
 
         for result in self.client.results(search):
-            yield ArxivPaper(
-                arxiv_id=self._normalize_arxiv_id(result.entry_id),
-                title=result.title,
-                abstract=result.summary,
-                authors=[a.name for a in result.authors],
-                pdf_url=result.pdf_url,
-                published=result.published.isoformat(),
-                categories=result.categories,
-            )
+            yield self._result_to_paper(result)
 
     def search_architectures(
         self,
@@ -128,15 +132,7 @@ class ArxivFetcher:
         search = arxiv.Search(id_list=[arxiv_id])
 
         for result in self.client.results(search):
-            return ArxivPaper(
-                arxiv_id=self._normalize_arxiv_id(result.entry_id),
-                title=result.title,
-                abstract=result.summary,
-                authors=[a.name for a in result.authors],
-                pdf_url=result.pdf_url,
-                published=result.published.isoformat(),
-                categories=result.categories,
-            )
+            return self._result_to_paper(result)
         return None
 
     def fetch_by_ids(self, arxiv_ids: list[str]) -> Iterator[ArxivPaper]:
@@ -144,15 +140,7 @@ class ArxivFetcher:
         search = arxiv.Search(id_list=arxiv_ids)
 
         for result in self.client.results(search):
-            yield ArxivPaper(
-                arxiv_id=self._normalize_arxiv_id(result.entry_id),
-                title=result.title,
-                abstract=result.summary,
-                authors=[a.name for a in result.authors],
-                pdf_url=result.pdf_url,
-                published=result.published.isoformat(),
-                categories=result.categories,
-            )
+            yield self._result_to_paper(result)
 
     def ingest_paper(self, paper: ArxivPaper, verbose: bool = True) -> dict:
         """

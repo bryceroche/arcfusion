@@ -57,7 +57,7 @@ class PaperDecomposer:
     def extract_components_from_text(self, text: str) -> list[dict]:
         """Extract component mentions from text."""
         text_lower = text.lower()
-        found_components = []
+        best_per_category = {}
 
         for category, patterns in self.COMPONENT_PATTERNS.items():
             for pattern in patterns:
@@ -65,18 +65,14 @@ class PaperDecomposer:
                     count = text_lower.count(pattern)
                     confidence = min(1.0, count / CONFIDENCE_SCALE_FACTOR)
 
-                    found_components.append({
-                        "category": category,
-                        "pattern": pattern,
-                        "confidence": confidence,
-                        "occurrences": count
-                    })
-
-        best_per_category = {}
-        for comp in found_components:
-            cat = comp["category"]
-            if cat not in best_per_category or comp["confidence"] > best_per_category[cat]["confidence"]:
-                best_per_category[cat] = comp
+                    # Keep best match per category
+                    if category not in best_per_category or confidence > best_per_category[category]["confidence"]:
+                        best_per_category[category] = {
+                            "category": category,
+                            "pattern": pattern,
+                            "confidence": confidence,
+                            "occurrences": count
+                        }
 
         return list(best_per_category.values())
 

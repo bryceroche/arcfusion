@@ -10,6 +10,18 @@ from typing import Optional
 from .db import Component
 from .composer import get_component_category
 
+# Default model hyperparameters
+DEFAULT_D_MODEL = 512
+DEFAULT_D_FF = 2048
+DEFAULT_N_HEADS = 8
+DEFAULT_N_LAYERS = 6
+DEFAULT_DROPOUT = 0.1
+DEFAULT_VOCAB_SIZE = 32000
+DEFAULT_MAX_LEN = 5000
+
+# Positional encoding constant
+POSITIONAL_ENCODING_BASE = 10000.0
+
 
 def _strip_parentheticals(name: str) -> str:
     """Remove parenthetical content from a name, e.g., 'BERT (Bidirectional)' -> 'BERT'."""
@@ -43,13 +55,13 @@ def extract_hyperparams(component: Component) -> dict:
 
     # Common defaults if not specified
     defaults = {
-        'd_model': 512,
-        'd_ff': 2048,
-        'n_heads': 8,
-        'n_layers': 6,
-        'dropout': 0.1,
-        'vocab_size': 32000,
-        'max_len': 5000,
+        'd_model': DEFAULT_D_MODEL,
+        'd_ff': DEFAULT_D_FF,
+        'n_heads': DEFAULT_N_HEADS,
+        'n_layers': DEFAULT_N_LAYERS,
+        'dropout': DEFAULT_DROPOUT,
+        'vocab_size': DEFAULT_VOCAB_SIZE,
+        'max_len': DEFAULT_MAX_LEN,
     }
 
     # Merge with component-specific params
