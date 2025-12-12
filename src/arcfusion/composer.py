@@ -8,6 +8,7 @@ Strategies:
 - Mutation: Swap components for alternatives
 """
 
+import math
 import random
 import re
 from .db import ArcFusionDB, Component, Recipe
@@ -47,6 +48,15 @@ START_CATEGORIES = ('position', 'embedding')
 # Categories that should only appear once in an architecture
 SINGLETON_CATEGORIES = ('output', 'embedding')
 
+# Required categories for a valid architecture (at least one from each group)
+# A valid arch needs EITHER attention OR a structure/efficiency component
+REQUIRED_CATEGORY_GROUPS = [
+    {'attention', 'structure'},  # Core processing - attention or encoder/decoder block
+]
+
+# Categories to avoid over-representing (training components don't make an arch)
+DISCOURAGED_HEAVY_CATEGORIES = ('training',)
+
 
 def _is_start_component(comp: 'Component') -> bool:
     """Check if component is suitable for starting an architecture."""
@@ -57,6 +67,21 @@ def _is_singleton_conflict(comp: 'Component', used_categories: set) -> bool:
     """Check if adding this component would violate singleton category constraint."""
     cat = get_component_category(comp)
     return cat in SINGLETON_CATEGORIES and cat in used_categories
+
+
+def _check_architecture_validity(used_categories: set) -> list[set]:
+    """Check if architecture has required categories. Returns missing groups."""
+    missing = []
+    for group in REQUIRED_CATEGORY_GROUPS:
+        if not (used_categories & group):  # No intersection
+            missing.append(group)
+    return missing
+
+
+def _is_training_only(used_categories: set) -> bool:
+    """Check if architecture is only training components (invalid)."""
+    non_training = used_categories - {'training'}
+    return len(non_training) == 0 or non_training == {'output'}
 
 
 def normalize_shape(shape_str: str) -> str:
@@ -121,7 +146,16 @@ def get_component_category(comp: Component) -> str:
     desc_lower = (comp.description or '').lower()
 
     # Check for specific patterns (order matters - more specific first)
-    if any(p in name_lower for p in ['position', 'encoding', 'rope', 'rotary', 'alibi']):
+    # FFN/layer patterns BEFORE position (catches "Position-wise Feed-Forward")
+    if any(p in name_lower for p in ['feed-forward', 'ffn', 'mlp']):
+        return 'layer'
+    # Position patterns (after FFN check)
+    # Avoid matching "position-wise" which is FFN-related
+    if 'position' in name_lower and 'wise' not in name_lower:
+        if 'embed' in name_lower:
+            return 'embedding'
+        return 'position'
+    if any(p in name_lower for p in ['encoding', 'rope', 'rotary', 'alibi']):
         if 'embed' in name_lower:
             return 'embedding'
         return 'position'
@@ -134,7 +168,7 @@ def get_component_category(comp: Component) -> str:
         if 'norm' in name_lower:
             return 'layer'
         return 'structure'
-    if any(p in name_lower for p in ['norm', 'feed-forward', 'ffn', 'mlp', 'gelu', 'relu', 'activation', 'residual', 'dropout', 'mask', 'mixing']):
+    if any(p in name_lower for p in ['norm', 'gelu', 'relu', 'activation', 'residual', 'dropout', 'mask', 'mixing']):
         return 'layer'
     if any(p in name_lower for p in ['flash', 'kv-cache', 'cache', 'efficient', 'sparse', 'quantiz']):
         return 'efficiency'
@@ -242,8 +276,16 @@ class EngineComposer:
         """Sort components by their typical order in an architecture."""
         return sorted(components, key=lambda c: CATEGORY_ORDER.get(get_component_category(c), 4))
 
-    def greedy_compose(self, start_component: str = None, max_components: int = 6) -> list[Component]:
-        """Build an engine greedily from the best components using interface matching."""
+    def greedy_compose(self, start_component: str = None, max_components: int = 6,
+                        temperature: float = 0.0, top_k: int = 3) -> list[Component]:
+        """Build an engine greedily from the best components using interface matching.
+
+        Args:
+            start_component: Optional name to start from
+            max_components: Maximum components to include
+            temperature: Sampling temperature (0 = deterministic, higher = more random)
+            top_k: Number of top candidates to sample from when temperature > 0
+        """
         all_components = self.db.find_components()
         if not all_components:
             return []
@@ -254,7 +296,11 @@ class EngineComposer:
         else:
             # Start with a positional encoding or embedding component
             start_comps = [c for c in all_components if _is_start_component(c)]
-            current = start_comps[0] if start_comps else all_components[0]
+            if temperature > 0 and len(start_comps) > 1:
+                # Random start when temperature > 0
+                current = random.choice(start_comps)
+            else:
+                current = start_comps[0] if start_comps else all_components[0]
 
         engine = [current]
         used_ids = {current.component_id}
@@ -279,10 +325,15 @@ class EngineComposer:
                 # Prefer components from categories not yet used
                 diverse = [c for c in unused if get_component_category(c) not in used_categories]
                 if diverse:
-                    # Pick the highest scoring one
-                    current = max(diverse, key=lambda c: c.usefulness_score)
+                    if temperature > 0:
+                        current = random.choice(diverse[:top_k])
+                    else:
+                        current = max(diverse, key=lambda c: c.usefulness_score)
                 elif unused:
-                    current = max(unused, key=lambda c: c.usefulness_score)
+                    if temperature > 0:
+                        current = random.choice(unused[:top_k])
+                    else:
+                        current = max(unused, key=lambda c: c.usefulness_score)
                 else:
                     break
             else:
@@ -291,8 +342,21 @@ class EngineComposer:
                     if get_component_category(comp) not in used_categories:
                         candidates[i] = (comp, score + DIVERSITY_BONUS)
 
-                best_comp, _ = max(candidates, key=lambda x: x[1])
-                current = best_comp
+                # Sort by score descending
+                candidates.sort(key=lambda x: x[1], reverse=True)
+
+                if temperature > 0 and len(candidates) > 1:
+                    # Sample from top-k with temperature-weighted probabilities
+                    top_candidates = candidates[:top_k]
+                    scores = [s for _, s in top_candidates]
+                    # Softmax with temperature
+                    max_score = max(scores)
+                    exp_scores = [math.exp((s - max_score) / max(temperature, 0.01)) for s in scores]
+                    total = sum(exp_scores)
+                    probs = [e / total for e in exp_scores]
+                    current = random.choices([c for c, _ in top_candidates], weights=probs, k=1)[0]
+                else:
+                    current = candidates[0][0]
 
             engine.append(current)
             used_ids.add(current.component_id)
@@ -301,8 +365,15 @@ class EngineComposer:
         # Sort by architecture order before returning
         return self.sort_by_architecture_order(engine)
 
-    def random_walk_compose(self, steps: int = 5, temperature: float = 1.0) -> list[Component]:
-        """Random walk through component space, biased by interface compatibility."""
+    def random_walk_compose(self, steps: int = 5, temperature: float = 1.0,
+                            ensure_valid: bool = True) -> list[Component]:
+        """Random walk through component space, biased by interface compatibility.
+
+        Args:
+            steps: Number of components to add
+            temperature: Sampling temperature (higher = more random)
+            ensure_valid: If True, ensure architecture has required categories
+        """
         if temperature < 0:
             raise ValueError("temperature must be >= 0")
 
@@ -360,6 +431,36 @@ class EngineComposer:
             engine.append(current)
             used_ids.add(current.component_id)
             used_categories.add(get_component_category(current))
+
+        # Ensure architecture validity by adding missing required components
+        if ensure_valid:
+            missing_groups = _check_architecture_validity(used_categories)
+            for group in missing_groups:
+                # Find a component from this required group
+                group_comps = [
+                    c for c in all_components
+                    if get_component_category(c) in group
+                    and c.component_id not in used_ids
+                ]
+                if group_comps:
+                    # Pick the highest-scoring one from the required group
+                    best = max(group_comps, key=lambda c: c.usefulness_score)
+                    engine.append(best)
+                    used_ids.add(best.component_id)
+                    used_categories.add(get_component_category(best))
+
+            # If architecture is training-only, add an attention component
+            if _is_training_only(used_categories):
+                attn_comps = [
+                    c for c in all_components
+                    if get_component_category(c) == 'attention'
+                    and c.component_id not in used_ids
+                ]
+                if attn_comps:
+                    best = max(attn_comps, key=lambda c: c.usefulness_score)
+                    engine.append(best)
+                    used_ids.add(best.component_id)
+                    used_categories.add(get_component_category(best))
 
         # Sort by architecture order
         return self.sort_by_architecture_order(engine)

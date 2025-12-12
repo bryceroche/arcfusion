@@ -566,6 +566,160 @@ class GroupedQueryAttention(nn.Module):
         is_causal=False,
         math_operations=["linear", "matmul", "softmax", "matmul", "linear"],
     ),
+    Component(
+        name="MultiQueryAttention",
+        description="MQA: Single key-value head shared across all query heads. Max memory efficiency.",
+        interface_in={"shape": "[batch, seq_len, d_model]", "dtype": "float32"},
+        interface_out={"shape": "[batch, seq_len, d_model]", "dtype": "float32"},
+        code="""
+class MultiQueryAttention(nn.Module):
+    '''Multi-Query Attention (PaLM style): 1 KV head, N query heads'''
+    def __init__(self, d_model, n_heads=8):
+        super().__init__()
+        self.n_heads = n_heads
+        self.head_dim = d_model // n_heads
+
+        self.W_q = nn.Linear(d_model, d_model, bias=False)
+        self.W_k = nn.Linear(d_model, self.head_dim, bias=False)  # Single head
+        self.W_v = nn.Linear(d_model, self.head_dim, bias=False)  # Single head
+        self.W_o = nn.Linear(d_model, d_model, bias=False)
+
+    def forward(self, x, mask=None):
+        B, L, D = x.shape
+
+        q = self.W_q(x).view(B, L, self.n_heads, self.head_dim).transpose(1, 2)
+        k = self.W_k(x).unsqueeze(1)  # [B, 1, L, head_dim]
+        v = self.W_v(x).unsqueeze(1)  # [B, 1, L, head_dim]
+
+        scores = (q @ k.transpose(-2, -1)) / math.sqrt(self.head_dim)
+        if mask is not None:
+            scores = scores.masked_fill(mask == 0, -1e9)
+        attn = F.softmax(scores, dim=-1)
+        out = attn @ v
+
+        out = out.transpose(1, 2).contiguous().view(B, L, D)
+        return self.W_o(out)
+""",
+        usefulness_score=0.84,
+        source_paper_id="2204.02311",  # PaLM paper
+        introduced_year=2022,
+        hyperparameters={"n_heads": 8, "head_dim": 64},
+        time_complexity="O(n^2 * d)",
+        space_complexity="O(n^2 + n*d/h)",  # Much less KV cache
+        flops_formula="n*d^2 + 2*n^2*d/h",  # Reduced KV computation
+        is_parallelizable=True,
+        is_causal=False,
+        math_operations=["linear", "matmul", "softmax", "matmul", "linear"],
+    ),
+    Component(
+        name="SlidingWindowAttention",
+        description="Local attention with fixed window size. O(n*w) complexity for long sequences.",
+        interface_in={"shape": "[batch, seq_len, d_model]", "dtype": "float32"},
+        interface_out={"shape": "[batch, seq_len, d_model]", "dtype": "float32"},
+        code="""
+class SlidingWindowAttention(nn.Module):
+    '''Sliding Window Attention (Mistral style)'''
+    def __init__(self, d_model, n_heads=8, window_size=4096):
+        super().__init__()
+        self.n_heads = n_heads
+        self.head_dim = d_model // n_heads
+        self.window_size = window_size
+
+        self.W_q = nn.Linear(d_model, d_model, bias=False)
+        self.W_k = nn.Linear(d_model, d_model, bias=False)
+        self.W_v = nn.Linear(d_model, d_model, bias=False)
+        self.W_o = nn.Linear(d_model, d_model, bias=False)
+
+    def forward(self, x, mask=None):
+        B, L, D = x.shape
+
+        q = self.W_q(x).view(B, L, self.n_heads, self.head_dim).transpose(1, 2)
+        k = self.W_k(x).view(B, L, self.n_heads, self.head_dim).transpose(1, 2)
+        v = self.W_v(x).view(B, L, self.n_heads, self.head_dim).transpose(1, 2)
+
+        # Create sliding window mask
+        window_mask = torch.ones(L, L, device=x.device, dtype=torch.bool)
+        for i in range(L):
+            start = max(0, i - self.window_size)
+            window_mask[i, start:i+1] = False  # Can attend within window
+
+        scores = (q @ k.transpose(-2, -1)) / math.sqrt(self.head_dim)
+        scores = scores.masked_fill(window_mask, float('-inf'))
+        attn = F.softmax(scores, dim=-1)
+        out = attn @ v
+
+        out = out.transpose(1, 2).contiguous().view(B, L, D)
+        return self.W_o(out)
+""",
+        usefulness_score=0.85,
+        source_paper_id="2310.06825",  # Mistral paper
+        introduced_year=2023,
+        hyperparameters={"n_heads": 8, "window_size": 4096},
+        time_complexity="O(n * w * d)",  # w = window size
+        space_complexity="O(n * w)",
+        flops_formula="4*n*d^2 + 2*n*w*d",
+        is_parallelizable=True,
+        is_causal=True,
+        math_operations=["linear", "matmul", "softmax", "matmul", "linear"],
+    ),
+    Component(
+        name="LinearAttention",
+        description="O(n) attention using kernel trick. No softmax, uses feature maps.",
+        interface_in={"shape": "[batch, seq_len, d_model]", "dtype": "float32"},
+        interface_out={"shape": "[batch, seq_len, d_model]", "dtype": "float32"},
+        code="""
+class LinearAttention(nn.Module):
+    '''Linear Attention with ELU feature map'''
+    def __init__(self, d_model, n_heads=8, eps=1e-6):
+        super().__init__()
+        self.n_heads = n_heads
+        self.head_dim = d_model // n_heads
+        self.eps = eps
+
+        self.W_q = nn.Linear(d_model, d_model, bias=False)
+        self.W_k = nn.Linear(d_model, d_model, bias=False)
+        self.W_v = nn.Linear(d_model, d_model, bias=False)
+        self.W_o = nn.Linear(d_model, d_model, bias=False)
+
+    def feature_map(self, x):
+        '''ELU-based feature map for positive features'''
+        return F.elu(x) + 1
+
+    def forward(self, x, mask=None):
+        B, L, D = x.shape
+
+        q = self.W_q(x).view(B, L, self.n_heads, self.head_dim).transpose(1, 2)
+        k = self.W_k(x).view(B, L, self.n_heads, self.head_dim).transpose(1, 2)
+        v = self.W_v(x).view(B, L, self.n_heads, self.head_dim).transpose(1, 2)
+
+        # Apply feature map (no softmax!)
+        q = self.feature_map(q)
+        k = self.feature_map(k)
+
+        # Linear attention: O(n * d^2) instead of O(n^2 * d)
+        # (Q @ K^T) @ V  =>  Q @ (K^T @ V)
+        kv = k.transpose(-2, -1) @ v  # [B, H, d, d]
+        qkv = q @ kv  # [B, H, L, d]
+
+        # Normalize
+        k_sum = k.sum(dim=-2, keepdim=True)  # [B, H, 1, d]
+        normalizer = (q * k_sum).sum(dim=-1, keepdim=True) + self.eps
+        out = qkv / normalizer
+
+        out = out.transpose(1, 2).contiguous().view(B, L, D)
+        return self.W_o(out)
+""",
+        usefulness_score=0.79,
+        source_paper_id="2006.16236",  # Performers paper
+        introduced_year=2020,
+        hyperparameters={"n_heads": 8, "feature_map": "elu"},
+        time_complexity="O(n * d^2)",  # Linear in sequence length!
+        space_complexity="O(d^2)",
+        flops_formula="4*n*d^2 + n*d^2",
+        is_parallelizable=True,
+        is_causal=False,
+        math_operations=["linear", "feature_map", "matmul", "normalize"],
+    ),
 ]
 
 ARCHITECTURES = [
@@ -643,6 +797,18 @@ COMPONENT_PAIRS = [
     ("SelectiveSSM", "LayerNorm", 0.89),
     ("TimeMixing", "ChannelMixing", 0.92),
     ("RetentionHead", "FeedForward", 0.87),
+    # New attention variants
+    ("MultiQueryAttention", "FeedForward", 0.92),
+    ("MultiQueryAttention", "RMSNorm", 0.91),
+    ("MultiQueryAttention", "LayerNorm", 0.90),
+    ("SlidingWindowAttention", "FeedForward", 0.90),
+    ("SlidingWindowAttention", "RMSNorm", 0.89),
+    ("SlidingWindowAttention", "RotaryEmbedding", 0.88),
+    ("LinearAttention", "FeedForward", 0.85),
+    ("LinearAttention", "LayerNorm", 0.84),
+    ("Embedding", "MultiQueryAttention", 0.88),
+    ("Embedding", "SlidingWindowAttention", 0.87),
+    ("Embedding", "LinearAttention", 0.83),
 ]
 
 
