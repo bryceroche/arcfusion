@@ -58,6 +58,15 @@ except ImportError:
     ModelConfig = None
     TrainingConfig = None
 
+# Optional ML Agent (requires torch)
+try:
+    from .ml_agent import MLAgent, ExecutionResult
+    HAS_ML_AGENT = HAS_VALIDATOR  # ML Agent requires validator
+except ImportError:
+    HAS_ML_AGENT = False
+    MLAgent = None
+    ExecutionResult = None
+
 __version__ = "0.2.0"
 __all__ = [
     # Database
@@ -97,6 +106,10 @@ __all__ = [
     "ModelConfig",
     "TrainingConfig",
     "HAS_VALIDATOR",
+    # ML Agent (optional)
+    "MLAgent",
+    "ExecutionResult",
+    "HAS_ML_AGENT",
     # Seeding
     "seed_transformers",
     "seed_modern_architectures",
