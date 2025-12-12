@@ -44,10 +44,19 @@ DIVERSITY_BONUS_RANDOM = 0.15  # Higher diversity bonus for random walk
 # Start component categories (architectures typically start with these)
 START_CATEGORIES = ('position', 'embedding')
 
+# Categories that should only appear once in an architecture
+SINGLETON_CATEGORIES = ('output', 'embedding')
+
 
 def _is_start_component(comp: 'Component') -> bool:
     """Check if component is suitable for starting an architecture."""
     return get_component_category(comp) in START_CATEGORIES
+
+
+def _is_singleton_conflict(comp: 'Component', used_categories: set) -> bool:
+    """Check if adding this component would violate singleton category constraint."""
+    cat = get_component_category(comp)
+    return cat in SINGLETON_CATEGORIES and cat in used_categories
 
 
 def normalize_shape(shape_str: str) -> str:
@@ -111,22 +120,28 @@ def get_component_category(comp: Component) -> str:
     name_lower = comp.name.lower()
     desc_lower = (comp.description or '').lower()
 
-    # Check for specific patterns
-    if any(p in name_lower for p in ['position', 'encoding', 'embedding', 'rope', 'rotary', 'alibi']):
+    # Check for specific patterns (order matters - more specific first)
+    if any(p in name_lower for p in ['position', 'encoding', 'rope', 'rotary', 'alibi']):
         if 'embed' in name_lower:
             return 'embedding'
         return 'position'
-    if any(p in name_lower for p in ['attention', 'attn', 'mha', 'ssm', 'selective']):
+    # Attention patterns - check before 'head' which could match output
+    if any(p in name_lower for p in ['attention', 'attn', 'mha', 'ssm', 'selective', 'retention']):
         return 'attention'
+    if 'embed' in name_lower:
+        return 'embedding'
     if any(p in name_lower for p in ['encoder', 'decoder', 'block', 'stack', 'layer ']):
         if 'norm' in name_lower:
             return 'layer'
         return 'structure'
-    if any(p in name_lower for p in ['norm', 'feed-forward', 'ffn', 'mlp', 'gelu', 'relu', 'activation', 'residual', 'dropout']):
+    if any(p in name_lower for p in ['norm', 'feed-forward', 'ffn', 'mlp', 'gelu', 'relu', 'activation', 'residual', 'dropout', 'mask', 'mixing']):
         return 'layer'
     if any(p in name_lower for p in ['flash', 'kv-cache', 'cache', 'efficient', 'sparse', 'quantiz']):
         return 'efficiency'
-    if any(p in name_lower for p in ['output', 'projection', 'head', 'vocab', 'logit']):
+    # Output patterns - 'head' alone could match attention heads, so be more specific
+    if any(p in name_lower for p in ['output', 'lm_head', 'lmhead', 'vocab', 'logit', 'softmax']):
+        return 'output'
+    if 'projection' in name_lower and 'output' in desc_lower:
         return 'output'
     if any(p in name_lower for p in ['learning rate', 'warmup', 'schedule', 'regulariz', 'label smooth', 'loss', 'optim']):
         return 'training'
@@ -253,12 +268,14 @@ class EngineComposer:
             candidates = [
                 (self.db.get_component(cid), score)
                 for cid, score in compatible
-                if cid not in used_ids
+                if cid not in used_ids and not _is_singleton_conflict(self.db.get_component(cid), used_categories)
             ]
 
             if not candidates:
                 # Try to find any unused component that fits
-                unused = [c for c in all_components if c.component_id not in used_ids]
+                unused = [c for c in all_components
+                          if c.component_id not in used_ids
+                          and not _is_singleton_conflict(c, used_categories)]
                 # Prefer components from categories not yet used
                 diverse = [c for c in unused if get_component_category(c) not in used_categories]
                 if diverse:
@@ -314,11 +331,13 @@ class EngineComposer:
             candidates = [
                 (self.db.get_component(cid), score)
                 for cid, score in compatible
-                if cid not in used_ids
+                if cid not in used_ids and not _is_singleton_conflict(self.db.get_component(cid), used_categories)
             ]
 
             if not candidates:
-                unused = [c for c in all_components if c.component_id not in used_ids]
+                unused = [c for c in all_components
+                          if c.component_id not in used_ids
+                          and not _is_singleton_conflict(c, used_categories)]
                 if not unused:
                     break
                 # Prefer diverse categories
@@ -326,7 +345,7 @@ class EngineComposer:
                 pool = diverse if diverse else unused
                 current = random.choice(pool)
             else:
-                # Boost diversity
+                # Boost diversity, filter singleton conflicts
                 boosted = []
                 for comp, score in candidates:
                     if get_component_category(comp) not in used_categories:

@@ -3,6 +3,10 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+pitch.md
+summary.md
+
+
 # Distribution / packaging
 build/
 dist/
