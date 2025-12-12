@@ -67,6 +67,16 @@ except ImportError:
     MLAgent = None
     ExecutionResult = None
 
+# Optional Cloud Training (requires modal)
+try:
+    from .cloud import CloudTrainer, CloudConfig, CloudResult, HAS_MODAL
+    HAS_CLOUD = HAS_MODAL
+except ImportError:
+    HAS_CLOUD = False
+    CloudTrainer = None
+    CloudConfig = None
+    CloudResult = None
+
 __version__ = "0.2.0"
 __all__ = [
     # Database
@@ -110,6 +120,11 @@ __all__ = [
     "MLAgent",
     "ExecutionResult",
     "HAS_ML_AGENT",
+    # Cloud Training (optional)
+    "CloudTrainer",
+    "CloudConfig",
+    "CloudResult",
+    "HAS_CLOUD",
     # Seeding
     "seed_transformers",
     "seed_modern_architectures",

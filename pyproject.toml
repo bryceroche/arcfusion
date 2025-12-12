@@ -45,8 +45,12 @@ dev = [
 llm = [
     "anthropic>=0.18.0",
 ]
+cloud = [
+    "modal>=0.64.0",
+]
 all = [
     "anthropic>=0.18.0",
+    "modal>=0.64.0",
     "pytest>=7.0",
     "pytest-cov>=4.0",
 ]

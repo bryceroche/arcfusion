@@ -20,6 +20,13 @@ try:
 except ImportError:
     HAS_VALIDATOR = False
 
+# Conditional import for cloud training (requires modal)
+try:
+    from .cloud import CloudTrainer, CloudConfig
+    HAS_CLOUD = True
+except ImportError:
+    HAS_CLOUD = False
+
 # CLI display constants
 SEPARATOR_WIDTH = 60
 SEPARATOR = "-" * SEPARATOR_WIDTH
@@ -574,8 +581,90 @@ def cmd_generate(args: argparse.Namespace) -> None:
             print(f"  - {name}")
 
 
+def _cmd_validate_cloud(args: argparse.Namespace) -> None:
+    """Run validation on cloud GPU via Modal."""
+    with ArcFusionDB(args.db) as db:
+        gen = CodeGenerator(db)
+        kwargs = _build_dream_kwargs(args)
+
+        # Step 1: Dream and generate code
+        print(f"Dreaming architecture using '{args.strategy}' strategy...")
+        try:
+            generated = gen.generate_from_dream(args.strategy, name=args.name, **kwargs)
+        except ValueError as e:
+            _cli_error(f"Dream failed: {e}")
+
+        print(f"Generated: {generated.name} with {generated.num_components} components")
+        for name in generated.component_names:
+            print(f"  - {name}")
+        print()
+
+        # Step 2: Configure cloud training
+        cloud_config = CloudConfig(
+            d_model=args.d_model,
+            vocab_size=args.vocab_size,
+            batch_size=args.batch_size,
+            max_steps=args.max_steps,
+            learning_rate=args.lr,
+        )
+
+        # Step 3: Run cloud training
+        trainer = CloudTrainer(config=cloud_config)
+        result = trainer.train(
+            code=generated.code,
+            model_name=generated.name,
+            verbose=True,
+        )
+
+        # Step 4: Report results
+        print(f"\n{SECTION_SEPARATOR}")
+        print("Cloud Validation Summary")
+        print(SEPARATOR)
+        print(f"  Model: {generated.name}")
+        print(f"  Success: {'Yes' if result.success else 'No'}")
+        print(f"  Parameters: {result.num_parameters:,}")
+
+        if result.error:
+            print(f"  Error: {result.error}")
+
+        if result.success:
+            print(f"  Final Loss: {result.final_loss:.4f}")
+            print(f"  Perplexity: {result.perplexity:.2f}")
+            print(f"  Training Steps: {result.steps_completed}")
+            print(f"  Training Time: {result.training_time_seconds:.1f}s")
+
+            if result.loss_history:
+                print(f"\nLoss History ({len(result.loss_history)} checkpoints):")
+                for entry in result.loss_history[-5:]:  # Last 5
+                    print(f"    Step {entry['step']}: {entry['loss']:.4f}")
+
+        # Step 5: Store results if requested
+        if args.store and result.success:
+            benchmark = BenchmarkResult(
+                engine_id=generated.name,
+                benchmark_name="cloud_validation",
+                score=result.perplexity,
+                parameters={
+                    'd_model': cloud_config.d_model,
+                    'vocab_size': cloud_config.vocab_size,
+                    'max_steps': cloud_config.max_steps,
+                    'gpu': cloud_config.gpu_type,
+                },
+                notes="Cloud-validated dreamed architecture via Modal"
+            )
+            db.add_benchmark(benchmark)
+            print(f"\nStored cloud validation result")
+
+
 def cmd_validate(args: argparse.Namespace) -> None:
     """Validate a dreamed architecture by building, training, and benchmarking."""
+    # Check for cloud mode
+    if getattr(args, 'cloud', False):
+        if not HAS_CLOUD:
+            _cli_error("Cloud training requires Modal. Install with: pip install 'arcfusion[cloud]'")
+        _cmd_validate_cloud(args)
+        return
+
     if not HAS_VALIDATOR:
         _cli_error("Validator requires PyTorch. Install with: pip install torch")
 
@@ -837,6 +926,7 @@ Examples:
     val_parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate (default: 1e-4)")
     val_parser.add_argument("--device", default="cpu", help="Device: cpu or cuda (default: cpu)")
     val_parser.add_argument("--store", action="store_true", help="Store benchmark results in database")
+    val_parser.add_argument("--cloud", action="store_true", help="Run training on cloud GPU via Modal")
 
     args = parser.parse_args()
 
