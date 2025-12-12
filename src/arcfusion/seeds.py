@@ -720,6 +720,356 @@ class LinearAttention(nn.Module):
         is_causal=False,
         math_operations=["linear", "feature_map", "matmul", "normalize"],
     ),
+    # =====================================================
+    # EFFICIENCY COMPONENTS
+    # =====================================================
+    Component(
+        name="LoRA",
+        description="Low-Rank Adaptation. Efficient fine-tuning by decomposing weight updates into low-rank matrices.",
+        interface_in={"shape": "[batch, seq_len, d_model]", "dtype": "float32"},
+        interface_out={"shape": "[batch, seq_len, d_model]", "dtype": "float32"},
+        code="""
+class LoRA(nn.Module):
+    '''Low-Rank Adaptation layer for efficient fine-tuning'''
+    def __init__(self, d_model, rank=8, alpha=16):
+        super().__init__()
+        self.rank = rank
+        self.alpha = alpha
+        self.scaling = alpha / rank
+        # Decomposed weight update: W' = W + BA where B is d_model x rank, A is rank x d_model
+        self.lora_A = nn.Parameter(torch.zeros(d_model, rank))
+        self.lora_B = nn.Parameter(torch.zeros(rank, d_model))
+        nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
+        nn.init.zeros_(self.lora_B)
+
+    def forward(self, x):
+        # Apply low-rank update: x @ (BA) * scaling
+        return x + (x @ self.lora_A @ self.lora_B) * self.scaling
+""",
+        usefulness_score=0.88,
+        source_paper_id="2106.09685",  # LoRA paper
+        introduced_year=2021,
+        hyperparameters={"rank": 8, "alpha": 16},
+        time_complexity="O(n * d * r)",
+        space_complexity="O(d * r)",
+        flops_formula="2 * n * d * r",
+        is_parallelizable=True,
+        is_causal=False,
+        math_operations=["matmul", "scale", "add"],
+    ),
+    Component(
+        name="MoERouter",
+        description="Mixture of Experts router. Selects top-k experts for each token using learned gating.",
+        interface_in={"shape": "[batch, seq_len, d_model]", "dtype": "float32"},
+        interface_out={"shape": "[batch, seq_len, n_experts]", "dtype": "float32"},
+        code="""
+class MoERouter(nn.Module):
+    '''Top-k router for Mixture of Experts'''
+    def __init__(self, d_model, n_experts, top_k=2):
+        super().__init__()
+        self.n_experts = n_experts
+        self.top_k = top_k
+        self.gate = nn.Linear(d_model, n_experts, bias=False)
+
+    def forward(self, x):
+        # x: [B, L, D] -> logits: [B, L, E]
+        logits = self.gate(x)
+        # Get top-k experts per token
+        top_k_logits, top_k_indices = torch.topk(logits, self.top_k, dim=-1)
+        top_k_weights = F.softmax(top_k_logits, dim=-1)
+        return top_k_weights, top_k_indices
+""",
+        usefulness_score=0.85,
+        source_paper_id="2101.03961",  # Switch Transformer
+        introduced_year=2021,
+        hyperparameters={"n_experts": 8, "top_k": 2},
+        time_complexity="O(n * d * E)",
+        space_complexity="O(d * E)",
+        flops_formula="n * d * E",
+        is_parallelizable=True,
+        is_causal=False,
+        math_operations=["linear", "topk", "softmax"],
+    ),
+    Component(
+        name="MoELayer",
+        description="Full Mixture of Experts layer. Routes tokens to selected experts and combines outputs.",
+        interface_in={"shape": "[batch, seq_len, d_model]", "dtype": "float32"},
+        interface_out={"shape": "[batch, seq_len, d_model]", "dtype": "float32"},
+        code="""
+class MoELayer(nn.Module):
+    '''Mixture of Experts with top-k routing'''
+    def __init__(self, d_model, d_ff, n_experts=8, top_k=2):
+        super().__init__()
+        self.n_experts = n_experts
+        self.top_k = top_k
+        self.gate = nn.Linear(d_model, n_experts, bias=False)
+        # Each expert is a simple FFN
+        self.experts = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(d_model, d_ff),
+                nn.GELU(),
+                nn.Linear(d_ff, d_model)
+            ) for _ in range(n_experts)
+        ])
+
+    def forward(self, x):
+        B, L, D = x.shape
+        # Get routing weights
+        logits = self.gate(x)  # [B, L, E]
+        weights, indices = torch.topk(logits, self.top_k, dim=-1)
+        weights = F.softmax(weights, dim=-1)  # [B, L, k]
+
+        # Compute expert outputs (simplified - full impl uses scatter/gather)
+        out = torch.zeros_like(x)
+        for i, expert in enumerate(self.experts):
+            mask = (indices == i).any(dim=-1)  # [B, L]
+            if mask.any():
+                expert_out = expert(x)
+                weight = (indices == i).float() * weights
+                weight = weight.sum(dim=-1, keepdim=True)
+                out = out + expert_out * weight
+        return out
+""",
+        usefulness_score=0.87,
+        source_paper_id="2401.04088",  # Mixtral paper
+        introduced_year=2024,
+        hyperparameters={"n_experts": 8, "top_k": 2, "d_ff": 14336},
+        time_complexity="O(n * k * d * d_ff / E)",  # Only k experts active
+        space_complexity="O(E * d * d_ff)",
+        flops_formula="n * k * 2 * d * d_ff",
+        is_parallelizable=True,
+        is_causal=False,
+        math_operations=["linear", "topk", "softmax", "gelu", "weighted_sum"],
+    ),
+    Component(
+        name="KVCache",
+        description="Key-Value cache for efficient autoregressive generation. Stores computed KV pairs.",
+        interface_in={"shape": "[batch, seq_len, d_model]", "dtype": "float32"},
+        interface_out={"shape": "[batch, total_len, d_model]", "dtype": "float32"},
+        code="""
+class KVCache(nn.Module):
+    '''KV Cache for efficient inference'''
+    def __init__(self, max_seq_len, n_heads, head_dim):
+        super().__init__()
+        self.max_seq_len = max_seq_len
+        # Cached keys and values
+        self.register_buffer('k_cache', None)
+        self.register_buffer('v_cache', None)
+        self.seq_len = 0
+
+    def update(self, k, v):
+        '''Add new k,v to cache and return full cached tensors'''
+        if self.k_cache is None:
+            self.k_cache = k
+            self.v_cache = v
+        else:
+            self.k_cache = torch.cat([self.k_cache, k], dim=2)
+            self.v_cache = torch.cat([self.v_cache, v], dim=2)
+        self.seq_len = self.k_cache.size(2)
+        return self.k_cache, self.v_cache
+
+    def forward(self, k, v):
+        return self.update(k, v)
+""",
+        usefulness_score=0.91,
+        source_paper_id="1706.03762",  # Original transformer, implicit
+        introduced_year=2017,
+        hyperparameters={"max_seq_len": 2048},
+        time_complexity="O(1)",  # Just concatenation
+        space_complexity="O(n * d)",
+        flops_formula="0 (just memory)",
+        is_parallelizable=True,
+        is_causal=True,
+        math_operations=["concat"],
+    ),
+    Component(
+        name="ALiBi",
+        description="Attention with Linear Biases. Adds linear position bias to attention scores, enabling length extrapolation.",
+        interface_in={"shape": "[batch, n_heads, seq_len, seq_len]", "dtype": "float32"},
+        interface_out={"shape": "[batch, n_heads, seq_len, seq_len]", "dtype": "float32"},
+        code="""
+class ALiBi(nn.Module):
+    '''Attention with Linear Biases for position encoding'''
+    def __init__(self, n_heads):
+        super().__init__()
+        self.n_heads = n_heads
+        # Slopes decrease geometrically: 2^(-8/n), 2^(-16/n), ...
+        slopes = torch.tensor([2 ** (-8 * i / n_heads) for i in range(1, n_heads + 1)])
+        self.register_buffer('slopes', slopes.view(1, n_heads, 1, 1))
+
+    def forward(self, attn_scores, seq_len=None):
+        if seq_len is None:
+            seq_len = attn_scores.size(-1)
+        # Create position bias matrix: slope * |i - j|
+        positions = torch.arange(seq_len, device=attn_scores.device)
+        bias = -torch.abs(positions.unsqueeze(0) - positions.unsqueeze(1))
+        bias = bias.unsqueeze(0).unsqueeze(0) * self.slopes
+        return attn_scores + bias
+""",
+        usefulness_score=0.86,
+        source_paper_id="2108.12409",  # ALiBi paper
+        introduced_year=2021,
+        hyperparameters={"n_heads": 8},
+        time_complexity="O(n^2)",
+        space_complexity="O(n^2)",
+        flops_formula="n^2 * h",
+        is_parallelizable=True,
+        is_causal=False,
+        math_operations=["subtract", "abs", "scale", "add"],
+    ),
+    # =====================================================
+    # FOUNDATIONAL COMPONENTS (pre-2020)
+    # =====================================================
+    Component(
+        name="CrossAttention",
+        description="Encoder-decoder cross attention. Queries from decoder attend to encoder outputs (T5, BART).",
+        interface_in={"shape": "[batch, tgt_len, d_model]", "dtype": "float32"},
+        interface_out={"shape": "[batch, tgt_len, d_model]", "dtype": "float32"},
+        code="""
+class CrossAttention(nn.Module):
+    '''Encoder-decoder cross attention'''
+    def __init__(self, d_model, n_heads):
+        super().__init__()
+        self.n_heads = n_heads
+        self.d_k = d_model // n_heads
+        self.W_q = nn.Linear(d_model, d_model)
+        self.W_k = nn.Linear(d_model, d_model)
+        self.W_v = nn.Linear(d_model, d_model)
+        self.W_o = nn.Linear(d_model, d_model)
+
+    def forward(self, x, encoder_out, mask=None):
+        B, L, D = x.shape
+        _, S, _ = encoder_out.shape  # Source length
+
+        q = self.W_q(x).view(B, L, self.n_heads, self.d_k).transpose(1, 2)
+        k = self.W_k(encoder_out).view(B, S, self.n_heads, self.d_k).transpose(1, 2)
+        v = self.W_v(encoder_out).view(B, S, self.n_heads, self.d_k).transpose(1, 2)
+
+        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.d_k)
+        if mask is not None:
+            scores = scores.masked_fill(mask == 0, -1e9)
+        attn = F.softmax(scores, dim=-1)
+        out = torch.matmul(attn, v)
+        out = out.transpose(1, 2).contiguous().view(B, L, D)
+        return self.W_o(out)
+""",
+        usefulness_score=0.89,
+        source_paper_id="1706.03762",  # Original Transformer
+        introduced_year=2017,
+        hyperparameters={"n_heads": 8, "d_model": 512},
+        time_complexity="O(n * m * d)",  # n=target, m=source
+        space_complexity="O(n * m)",
+        flops_formula="4*n*d^2 + 2*n*m*d",
+        is_parallelizable=True,
+        is_causal=False,
+        math_operations=["matmul", "scale", "softmax", "matmul", "linear"],
+    ),
+    Component(
+        name="RelativePositionBias",
+        description="T5-style learned relative position bias. Adds learned bias based on relative position to attention.",
+        interface_in={"shape": "[batch, n_heads, seq_len, seq_len]", "dtype": "float32"},
+        interface_out={"shape": "[batch, n_heads, seq_len, seq_len]", "dtype": "float32"},
+        code="""
+class RelativePositionBias(nn.Module):
+    '''T5-style relative position bias'''
+    def __init__(self, n_heads, num_buckets=32, max_distance=128):
+        super().__init__()
+        self.n_heads = n_heads
+        self.num_buckets = num_buckets
+        self.max_distance = max_distance
+        self.relative_attention_bias = nn.Embedding(num_buckets, n_heads)
+
+    def _relative_position_bucket(self, relative_position):
+        '''Bucket relative positions into num_buckets categories'''
+        num_buckets = self.num_buckets // 2
+        ret = (relative_position > 0).long() * num_buckets
+        n = torch.abs(relative_position)
+        max_exact = num_buckets // 2
+        is_small = n < max_exact
+        val_if_large = max_exact + (
+            torch.log(n.float() / max_exact) / math.log(self.max_distance / max_exact) * (num_buckets - max_exact)
+        ).long()
+        val_if_large = torch.min(val_if_large, torch.full_like(val_if_large, num_buckets - 1))
+        ret += torch.where(is_small, n, val_if_large)
+        return ret
+
+    def forward(self, attn_scores):
+        seq_len = attn_scores.size(-1)
+        positions = torch.arange(seq_len, device=attn_scores.device)
+        relative_position = positions.unsqueeze(0) - positions.unsqueeze(1)
+        buckets = self._relative_position_bucket(relative_position)
+        bias = self.relative_attention_bias(buckets).permute(2, 0, 1).unsqueeze(0)
+        return attn_scores + bias
+""",
+        usefulness_score=0.84,
+        source_paper_id="1910.10683",  # T5 paper
+        introduced_year=2019,
+        hyperparameters={"num_buckets": 32, "max_distance": 128},
+        time_complexity="O(n^2)",
+        space_complexity="O(B * n_heads)",
+        flops_formula="n^2 + n^2 * h",
+        is_parallelizable=True,
+        is_causal=False,
+        math_operations=["embedding", "bucket", "add"],
+    ),
+    Component(
+        name="GatedLinearUnit",
+        description="GLU activation. Splits input and uses one half to gate the other. Used in PaLM, GPT-J.",
+        interface_in={"shape": "[batch, seq_len, d_model]", "dtype": "float32"},
+        interface_out={"shape": "[batch, seq_len, d_model]", "dtype": "float32"},
+        code="""
+class GatedLinearUnit(nn.Module):
+    '''Gated Linear Unit (GLU) for FFN'''
+    def __init__(self, d_model, d_ff):
+        super().__init__()
+        self.fc1 = nn.Linear(d_model, d_ff * 2)  # Project to 2x for gating
+        self.fc2 = nn.Linear(d_ff, d_model)
+
+    def forward(self, x):
+        hidden = self.fc1(x)
+        hidden, gate = hidden.chunk(2, dim=-1)
+        return self.fc2(hidden * torch.sigmoid(gate))
+""",
+        usefulness_score=0.83,
+        source_paper_id="1612.08083",  # GLU paper
+        introduced_year=2016,
+        hyperparameters={"d_ff": 2048},
+        time_complexity="O(n * d * d_ff)",
+        space_complexity="O(d * d_ff)",
+        flops_formula="n * (2 * d * d_ff + d_ff * d)",
+        is_parallelizable=True,
+        is_causal=False,
+        math_operations=["linear", "chunk", "sigmoid", "mul", "linear"],
+    ),
+    Component(
+        name="GeGLU",
+        description="GELU-gated GLU variant. Uses GELU instead of sigmoid for gating. Used in PaLM.",
+        interface_in={"shape": "[batch, seq_len, d_model]", "dtype": "float32"},
+        interface_out={"shape": "[batch, seq_len, d_model]", "dtype": "float32"},
+        code="""
+class GeGLU(nn.Module):
+    '''GELU-Gated Linear Unit'''
+    def __init__(self, d_model, d_ff):
+        super().__init__()
+        self.fc1 = nn.Linear(d_model, d_ff * 2)
+        self.fc2 = nn.Linear(d_ff, d_model)
+
+    def forward(self, x):
+        hidden = self.fc1(x)
+        hidden, gate = hidden.chunk(2, dim=-1)
+        return self.fc2(hidden * F.gelu(gate))
+""",
+        usefulness_score=0.85,
+        source_paper_id="2002.05202",  # GLU Variants paper
+        introduced_year=2020,
+        hyperparameters={"d_ff": 2048},
+        time_complexity="O(n * d * d_ff)",
+        space_complexity="O(d * d_ff)",
+        flops_formula="n * (2 * d * d_ff + d_ff * d)",
+        is_parallelizable=True,
+        is_causal=False,
+        math_operations=["linear", "chunk", "gelu", "mul", "linear"],
+    ),
 ]
 
 ARCHITECTURES = [
@@ -779,6 +1129,49 @@ ARCHITECTURES = [
         "components": ["Embedding", "GroupedQueryAttention", "RMSNorm", "RotaryEmbedding", "SwiGLU", "CausalMask", "SoftmaxOutput"],
         "score": 0.93
     },
+    # New architectures
+    {
+        "name": "T5",
+        "description": "Text-to-Text Transfer Transformer. Encoder-decoder with relative position bias.",
+        "paper_url": "https://arxiv.org/abs/1910.10683",
+        "components": ["Embedding", "MultiHeadAttention", "CrossAttention", "RelativePositionBias", "FeedForward", "LayerNorm", "SoftmaxOutput"],
+        "score": 0.94
+    },
+    {
+        "name": "Mixtral-8x7B",
+        "description": "Sparse MoE with 8 experts, 2 active per token. Based on Mistral with MoE layers.",
+        "paper_url": "https://arxiv.org/abs/2401.04088",
+        "components": ["Embedding", "GroupedQueryAttention", "MoELayer", "RMSNorm", "RotaryEmbedding", "CausalMask", "SoftmaxOutput"],
+        "score": 0.94
+    },
+    {
+        "name": "PaLM",
+        "description": "Pathways Language Model. Parallel attention+FFN with SwiGLU and multi-query attention.",
+        "paper_url": "https://arxiv.org/abs/2204.02311",
+        "components": ["Embedding", "MultiQueryAttention", "SwiGLU", "RMSNorm", "RotaryEmbedding", "CausalMask", "SoftmaxOutput"],
+        "score": 0.95
+    },
+    {
+        "name": "BLOOM",
+        "description": "BigScience Large Open-science Open-access Multilingual model with ALiBi positions.",
+        "paper_url": "https://arxiv.org/abs/2211.05100",
+        "components": ["Embedding", "MultiHeadAttention", "ALiBi", "FeedForward", "LayerNorm", "CausalMask", "SoftmaxOutput"],
+        "score": 0.91
+    },
+    {
+        "name": "Falcon",
+        "description": "Technology Innovation Institute model with multi-query attention and ALiBi.",
+        "paper_url": "https://arxiv.org/abs/2306.01116",
+        "components": ["Embedding", "MultiQueryAttention", "ALiBi", "FeedForward", "LayerNorm", "CausalMask", "SoftmaxOutput"],
+        "score": 0.92
+    },
+    {
+        "name": "GPT-NeoX",
+        "description": "EleutherAI's GPT variant with rotary embeddings and parallel attention.",
+        "paper_url": "https://arxiv.org/abs/2204.06745",
+        "components": ["Embedding", "MultiHeadAttention", "RotaryEmbedding", "FeedForward", "LayerNorm", "CausalMask", "SoftmaxOutput"],
+        "score": 0.89
+    },
 ]
 
 COMPONENT_PAIRS = [
@@ -809,6 +1202,30 @@ COMPONENT_PAIRS = [
     ("Embedding", "MultiQueryAttention", 0.88),
     ("Embedding", "SlidingWindowAttention", 0.87),
     ("Embedding", "LinearAttention", 0.83),
+    # New efficiency/foundational component pairs
+    ("LoRA", "MultiHeadAttention", 0.90),
+    ("LoRA", "FeedForward", 0.89),
+    ("LoRA", "GroupedQueryAttention", 0.88),
+    ("MoELayer", "RMSNorm", 0.91),
+    ("MoELayer", "LayerNorm", 0.90),
+    ("MoELayer", "MultiHeadAttention", 0.87),
+    ("MoELayer", "GroupedQueryAttention", 0.89),
+    ("MoERouter", "FeedForward", 0.86),
+    ("KVCache", "MultiHeadAttention", 0.92),
+    ("KVCache", "GroupedQueryAttention", 0.93),
+    ("KVCache", "MultiQueryAttention", 0.94),
+    ("ALiBi", "MultiHeadAttention", 0.88),
+    ("ALiBi", "MultiQueryAttention", 0.87),
+    ("CrossAttention", "MultiHeadAttention", 0.91),
+    ("CrossAttention", "LayerNorm", 0.90),
+    ("CrossAttention", "FeedForward", 0.88),
+    ("RelativePositionBias", "MultiHeadAttention", 0.89),
+    ("RelativePositionBias", "CrossAttention", 0.90),
+    ("GatedLinearUnit", "LayerNorm", 0.86),
+    ("GatedLinearUnit", "RMSNorm", 0.87),
+    ("GeGLU", "LayerNorm", 0.87),
+    ("GeGLU", "RMSNorm", 0.88),
+    ("SwiGLU", "GeGLU", 0.92),  # Similar components
 ]
 
 
