@@ -56,10 +56,6 @@ class Component:
         if not self.component_id:
             content = f"{self.name}{json.dumps(self.interface_in, sort_keys=True)}{json.dumps(self.interface_out, sort_keys=True)}"
             self.component_id = hashlib.sha256(content.encode()).hexdigest()[:12]
-        if self.hyperparameters is None:
-            self.hyperparameters = {}
-        if self.math_operations is None:
-            self.math_operations = []
 
 
 @dataclass
@@ -118,7 +114,7 @@ class BenchmarkResult:
 class DreamedEngine:
     """Track composer-generated architectures"""
     strategy: str  # greedy, random, mutate, crossover
-    component_ids: list
+    component_ids: list = field(default_factory=list)
     estimated_score: float = 0.0
     parent_engine_ids: list = field(default_factory=list)  # For crossover/mutate
     validated: bool = False
@@ -131,15 +127,13 @@ class DreamedEngine:
         if not self.dream_id:
             content = f"{self.strategy}{json.dumps(self.component_ids, sort_keys=True)}{self.estimated_score}"
             self.dream_id = hashlib.sha256(content.encode()).hexdigest()[:12]
-        if self.parent_engine_ids is None:
-            self.parent_engine_ids = []
 
 
 @dataclass
 class ComponentConfiguration:
     """A proven sub-configuration of components that work well together."""
     name: str
-    component_ids: list  # Ordered list of component IDs
+    component_ids: list = field(default_factory=list)  # Ordered list of component IDs
     description: str = ""
     source_engine_id: str = ""  # Engine this config was extracted from
     config_score: float = 0.0  # How well this config performs
@@ -152,8 +146,6 @@ class ComponentConfiguration:
         if not self.config_id:
             content = f"{self.name}{json.dumps(self.component_ids, sort_keys=True)}"
             self.config_id = hashlib.sha256(content.encode()).hexdigest()[:12]
-        if self.component_ids is None:
-            self.component_ids = []
 
 
 @dataclass
@@ -165,8 +157,8 @@ class Recipe:
     the ML Agent how to wire them together.
     """
     name: str
-    component_ids: list  # Ordered list of component IDs
-    assembly: dict  # Assembly instructions: connections, residuals, shapes
+    component_ids: list = field(default_factory=list)  # Ordered list of component IDs
+    assembly: dict = field(default_factory=dict)  # Assembly instructions
     strategy: str = ""  # Dream strategy used: greedy, random, crossover, mutate
     estimated_score: float = 0.0
     parent_engine_ids: list = field(default_factory=list)  # For crossover/mutate
@@ -178,12 +170,6 @@ class Recipe:
         if not self.recipe_id:
             content = f"{self.name}{json.dumps(self.component_ids, sort_keys=True)}{json.dumps(self.assembly, sort_keys=True)}"
             self.recipe_id = hashlib.sha256(content.encode()).hexdigest()[:12]
-        if self.component_ids is None:
-            self.component_ids = []
-        if self.assembly is None:
-            self.assembly = {}
-        if self.parent_engine_ids is None:
-            self.parent_engine_ids = []
 
 
 @dataclass

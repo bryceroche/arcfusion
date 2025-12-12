@@ -16,7 +16,7 @@ from typing import Optional
 import time
 
 from .db import ArcFusionDB, Recipe, RecipeAdjustment, Component
-from .codegen import CodeGenerator, GeneratedCode
+from .codegen import CodeGenerator
 from .composer import EngineComposer
 
 # Adjustment type constants
