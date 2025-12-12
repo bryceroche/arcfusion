@@ -120,22 +120,22 @@ def generate_component_class(component: Component, index: int) -> str:
 
     # Extract hyperparameters
     params = extract_hyperparams(component)
-    d_model = params.get('d_model', 512)
+    d_model = params.get('d_model', DEFAULT_D_MODEL)
 
     # Determine what layers to initialize and forward logic based on category
     init_layers = ""
     forward_body = ""
 
     if category == 'attention':
-        init_layers = """
-        self.n_heads = kwargs.get('n_heads', 8)
+        init_layers = f"""
+        self.n_heads = kwargs.get('n_heads', {DEFAULT_N_HEADS})
         self.head_dim = d_model // self.n_heads
         self.scale = self.head_dim ** -0.5
         self.q_proj = nn.Linear(d_model, d_model)
         self.k_proj = nn.Linear(d_model, d_model)
         self.v_proj = nn.Linear(d_model, d_model)
         self.out_proj = nn.Linear(d_model, d_model)
-        self.dropout = nn.Dropout(kwargs.get('dropout', 0.1))"""
+        self.dropout = nn.Dropout(kwargs.get('dropout', {DEFAULT_DROPOUT}))"""
         forward_body = """
         B, N, C = x.shape
         q = self.q_proj(x).reshape(B, N, self.n_heads, self.head_dim).permute(0, 2, 1, 3)
@@ -159,12 +159,12 @@ def generate_component_class(component: Component, index: int) -> str:
             forward_body = """
         return self.norm(x)"""
         elif 'feed' in component.name.lower() or 'ffn' in component.name.lower():
-            init_layers = """
+            init_layers = f"""
         self.d_ff = kwargs.get('d_ff', d_model * 4)
         self.fc1 = nn.Linear(d_model, self.d_ff)
         self.fc2 = nn.Linear(self.d_ff, d_model)
         self.activation = nn.GELU()
-        self.dropout = nn.Dropout(kwargs.get('dropout', 0.1))"""
+        self.dropout = nn.Dropout(kwargs.get('dropout', {DEFAULT_DROPOUT}))"""
             forward_body = """
         x = self.fc1(x)
         x = self.activation(x)
@@ -172,17 +172,17 @@ def generate_component_class(component: Component, index: int) -> str:
         x = self.fc2(x)
         return x"""
         else:
-            init_layers = """
-        self.dropout = nn.Dropout(kwargs.get('dropout', 0.1))"""
+            init_layers = f"""
+        self.dropout = nn.Dropout(kwargs.get('dropout', {DEFAULT_DROPOUT}))"""
             forward_body = """
         return self.dropout(x)"""
 
     elif category == 'position':
-        init_layers = """
-        self.max_len = kwargs.get('max_len', 5000)
+        init_layers = f"""
+        self.max_len = kwargs.get('max_len', {DEFAULT_MAX_LEN})
         pe = torch.zeros(self.max_len, d_model)
         position = torch.arange(0, self.max_len).unsqueeze(1).float()
-        div_term = torch.exp(torch.arange(0, d_model, 2).float() * -(math.log(10000.0) / d_model))
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * -(math.log({POSITIONAL_ENCODING_BASE}) / d_model))
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
         self.register_buffer('pe', pe.unsqueeze(0))"""
@@ -191,12 +191,12 @@ def generate_component_class(component: Component, index: int) -> str:
         return x + self.pe[:, :seq_len]"""
 
     elif category == 'embedding':
-        init_layers = """
-        self.vocab_size = kwargs.get('vocab_size', 32000)
-        self.max_len = kwargs.get('max_len', 5000)
+        init_layers = f"""
+        self.vocab_size = kwargs.get('vocab_size', {DEFAULT_VOCAB_SIZE})
+        self.max_len = kwargs.get('max_len', {DEFAULT_MAX_LEN})
         self.token_emb = nn.Embedding(self.vocab_size, d_model)
         self.pos_emb = nn.Embedding(self.max_len, d_model)
-        self.dropout = nn.Dropout(kwargs.get('dropout', 0.1))"""
+        self.dropout = nn.Dropout(kwargs.get('dropout', {DEFAULT_DROPOUT}))"""
         forward_body = """
         # Handle both token IDs (2D) and pre-embedded (3D) input
         if x.dim() == 3:
@@ -207,15 +207,15 @@ def generate_component_class(component: Component, index: int) -> str:
         return self.dropout(tok + pos)"""
 
     elif category == 'output':
-        init_layers = """
-        self.vocab_size = kwargs.get('vocab_size', 32000)
+        init_layers = f"""
+        self.vocab_size = kwargs.get('vocab_size', {DEFAULT_VOCAB_SIZE})
         self.proj = nn.Linear(d_model, self.vocab_size)"""
         forward_body = """
         return self.proj(x)"""
 
     elif category == 'structure':
-        init_layers = """
-        self.n_layers = kwargs.get('n_layers', 6)
+        init_layers = f"""
+        self.n_layers = kwargs.get('n_layers', {DEFAULT_N_LAYERS})
         self.layers = nn.ModuleList()
         self.norm = nn.LayerNorm(d_model)"""
         forward_body = """
@@ -303,7 +303,7 @@ class {name}(nn.Module):
 {chr(10).join(f'        - {c.name}' for c in components)}
     """
 
-    def __init__(self, d_model=512, vocab_size=32000, **kwargs):
+    def __init__(self, d_model={DEFAULT_D_MODEL}, vocab_size={DEFAULT_VOCAB_SIZE}, **kwargs):
         super().__init__()
         self.d_model = d_model
         self.vocab_size = vocab_size
@@ -388,12 +388,12 @@ from typing import Optional, Tuple
 # Example usage
 if __name__ == "__main__":
     # Create model
-    model = {name}(d_model=512, vocab_size=32000)
+    model = {name}(d_model={DEFAULT_D_MODEL}, vocab_size={DEFAULT_VOCAB_SIZE})
     print(f"Model: {{model.__class__.__name__}}")
     print(f"Parameters: {{sum(p.numel() for p in model.parameters()):,}}")
 
     # Test forward pass
-    batch_size, seq_len, d_model = 2, 128, 512
+    batch_size, seq_len, d_model = 2, 128, {DEFAULT_D_MODEL}
     x = torch.randn(batch_size, seq_len, d_model)
 
     with torch.no_grad():

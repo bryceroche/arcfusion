@@ -35,6 +35,20 @@ CATEGORY_CLOSE_BONUS = 0.1  # Bonus for nearly correct ordering
 CONFIG_MATCH_WEIGHT = 0.15  # Weight for matching known-good configurations
 CONFIG_VALIDATED_BONUS = 0.05  # Extra bonus for validated configurations
 
+# Composition thresholds
+MIN_COMPATIBILITY_SCORE = 0.4  # Minimum score to consider components compatible
+MIN_RANDOM_COMPATIBILITY = 0.3  # Lower threshold for random walk exploration
+DIVERSITY_BONUS = 0.1  # Bonus for selecting components from new categories
+DIVERSITY_BONUS_RANDOM = 0.15  # Higher diversity bonus for random walk
+
+# Start component categories (architectures typically start with these)
+START_CATEGORIES = ('position', 'embedding')
+
+
+def _is_start_component(comp: 'Component') -> bool:
+    """Check if component is suitable for starting an architecture."""
+    return get_component_category(comp) in START_CATEGORIES
+
 
 def normalize_shape(shape_str: str) -> str:
     """Normalize a shape string for comparison."""
@@ -224,8 +238,8 @@ class EngineComposer:
             current = matches[0] if matches else all_components[0]
         else:
             # Start with a positional encoding or embedding component
-            positional = [c for c in all_components if get_component_category(c) in ('position', 'embedding')]
-            current = positional[0] if positional else all_components[0]
+            start_comps = [c for c in all_components if _is_start_component(c)]
+            current = start_comps[0] if start_comps else all_components[0]
 
         engine = [current]
         used_ids = {current.component_id}
@@ -233,7 +247,9 @@ class EngineComposer:
 
         while len(engine) < max_components:
             # Use interface-aware compatibility
-            compatible = self.get_interface_compatible_components(current.component_id, min_score=0.4)
+            compatible = self.get_interface_compatible_components(
+                current.component_id, min_score=MIN_COMPATIBILITY_SCORE
+            )
             candidates = [
                 (self.db.get_component(cid), score)
                 for cid, score in compatible
@@ -256,7 +272,7 @@ class EngineComposer:
                 # Prefer diversity - boost components from new categories
                 for i, (comp, score) in enumerate(candidates):
                     if get_component_category(comp) not in used_categories:
-                        candidates[i] = (comp, score + 0.1)
+                        candidates[i] = (comp, score + DIVERSITY_BONUS)
 
                 best_comp, _ = max(candidates, key=lambda x: x[1])
                 current = best_comp
@@ -278,7 +294,7 @@ class EngineComposer:
             return []
 
         # Start preferentially with position/embedding components
-        start_candidates = [c for c in all_components if get_component_category(c) in ('position', 'embedding')]
+        start_candidates = [c for c in all_components if _is_start_component(c)]
         if not start_candidates:
             start_candidates = all_components
 
@@ -291,8 +307,10 @@ class EngineComposer:
         used_categories = {get_component_category(current)}
 
         for _ in range(steps - 1):
-            # Use interface-aware compatibility
-            compatible = self.get_interface_compatible_components(current.component_id, min_score=0.3)
+            # Use interface-aware compatibility (lower threshold for exploration)
+            compatible = self.get_interface_compatible_components(
+                current.component_id, min_score=MIN_RANDOM_COMPATIBILITY
+            )
             candidates = [
                 (self.db.get_component(cid), score)
                 for cid, score in compatible
@@ -312,7 +330,7 @@ class EngineComposer:
                 boosted = []
                 for comp, score in candidates:
                     if get_component_category(comp) not in used_categories:
-                        boosted.append((comp, score + 0.15))
+                        boosted.append((comp, score + DIVERSITY_BONUS_RANDOM))
                     else:
                         boosted.append((comp, score))
 
