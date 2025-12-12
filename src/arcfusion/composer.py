@@ -343,8 +343,8 @@ class EngineComposer:
             raise ValueError(f"Engine not found: '{engine2_name}'")
 
         # Get all components from both engines
-        comps1 = [self.db.get_component(cid) for cid in e1.component_ids if self.db.get_component(cid)]
-        comps2 = [self.db.get_component(cid) for cid in e2.component_ids if self.db.get_component(cid)]
+        comps1 = [c for cid in e1.component_ids if (c := self.db.get_component(cid))]
+        comps2 = [c for cid in e2.component_ids if (c := self.db.get_component(cid))]
 
         all_parent_comps = comps1 + comps2
         if not all_parent_comps:
@@ -582,8 +582,7 @@ class EngineComposer:
         if not engine or not engine.component_ids:
             return []
 
-        components = [self.db.get_component(cid) for cid in engine.component_ids]
-        components = [c for c in components if c]  # Filter None
+        components = [c for cid in engine.component_ids if (c := self.db.get_component(cid))]
 
         if len(components) < min_size:
             return []

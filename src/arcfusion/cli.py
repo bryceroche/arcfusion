@@ -49,6 +49,17 @@ def _build_dream_kwargs(args: argparse.Namespace) -> dict:
     return kwargs
 
 
+def _add_dream_strategy_args(parser: argparse.ArgumentParser, random_steps: int = 5) -> None:
+    """Add common dream strategy arguments to a parser."""
+    parser.add_argument("--start", help="Starting component name for greedy strategy")
+    parser.add_argument("--steps", type=int, default=random_steps, help=f"Number of components for random strategy (default: {random_steps})")
+    parser.add_argument("--temperature", type=float, default=1.0, help="Sampling temperature for random strategy (default: 1.0)")
+    parser.add_argument("--engine", help="Engine name to mutate (required for mutate strategy)")
+    parser.add_argument("--rate", type=float, default=0.2, help="Mutation rate 0-1 (default: 0.2)")
+    parser.add_argument("--engine1", help="First parent engine (required for crossover)")
+    parser.add_argument("--engine2", help="Second parent engine (required for crossover)")
+
+
 def cmd_init(args: argparse.Namespace) -> None:
     """Initialize database with seed data."""
     with ArcFusionDB(args.db) as db:
@@ -726,13 +737,7 @@ Examples:
         choices=["greedy", "random", "mutate", "crossover"],
         help="Composition strategy"
     )
-    dream_parser.add_argument("--start", help="Starting component name for greedy strategy")
-    dream_parser.add_argument("--steps", type=int, default=5, help="Number of components for random strategy (default: 5)")
-    dream_parser.add_argument("--temperature", type=float, default=1.0, help="Sampling temperature for random strategy (default: 1.0)")
-    dream_parser.add_argument("--engine", help="Engine name to mutate (required for mutate strategy)")
-    dream_parser.add_argument("--rate", type=float, default=0.2, help="Mutation rate 0-1 (default: 0.2)")
-    dream_parser.add_argument("--engine1", help="First parent engine (required for crossover)")
-    dream_parser.add_argument("--engine2", help="Second parent engine (required for crossover)")
+    _add_dream_strategy_args(dream_parser)
 
     # ingest
     ingest_parser = subparsers.add_parser("ingest", help="Ingest papers from arXiv")
@@ -766,13 +771,7 @@ Examples:
     )
     gen_parser.add_argument("--name", "-n", default="DreamedArchitecture", help="Class name for generated architecture (default: DreamedArchitecture)")
     gen_parser.add_argument("--output", "-o", help="Output .py file path (prints to stdout if not specified)")
-    gen_parser.add_argument("--start", help="Starting component name for greedy strategy")
-    gen_parser.add_argument("--steps", type=int, default=6, help="Number of components for random strategy (default: 6)")
-    gen_parser.add_argument("--temperature", type=float, default=1.0, help="Sampling temperature for random strategy (default: 1.0)")
-    gen_parser.add_argument("--engine", help="Engine name to mutate (required for mutate strategy)")
-    gen_parser.add_argument("--rate", type=float, default=0.2, help="Mutation rate 0-1 (default: 0.2)")
-    gen_parser.add_argument("--engine1", help="First parent engine (required for crossover)")
-    gen_parser.add_argument("--engine2", help="Second parent engine (required for crossover)")
+    _add_dream_strategy_args(gen_parser, random_steps=6)
 
     # config (component configurations management)
     config_parser = subparsers.add_parser(
@@ -828,13 +827,7 @@ Examples:
     )
     val_parser.add_argument("--name", "-n", default="ValidatedModel", help="Name for the model")
     # Dream strategy args
-    val_parser.add_argument("--start", help="Starting component for greedy")
-    val_parser.add_argument("--steps", type=int, default=5, help="Components for random")
-    val_parser.add_argument("--temperature", type=float, default=1.0, help="Temperature for random")
-    val_parser.add_argument("--engine", help="Engine to mutate")
-    val_parser.add_argument("--rate", type=float, default=0.2, help="Mutation rate")
-    val_parser.add_argument("--engine1", help="First parent for crossover")
-    val_parser.add_argument("--engine2", help="Second parent for crossover")
+    _add_dream_strategy_args(val_parser)
     # Model config
     val_parser.add_argument("--d-model", dest="d_model", type=int, default=128, help="Model dimension (default: 128)")
     val_parser.add_argument("--vocab-size", dest="vocab_size", type=int, default=1000, help="Vocabulary size (default: 1000)")

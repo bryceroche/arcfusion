@@ -46,6 +46,31 @@ MAX_PERPLEXITY_FOR_SCORING = 1000.0  # Scale for converting ppl to 0-1 score
 DEFAULT_EVAL_BATCHES = 10  # Number of batches for evaluation
 
 
+def _create_embedding_and_head(
+    model: 'nn.Module',
+    inputs: 'torch.Tensor',
+    targets: 'torch.Tensor',
+    device: str
+) -> tuple:
+    """
+    Create embedding and LM head layers for models that expect embedded input.
+
+    Args:
+        model: The model (used to get d_model)
+        inputs: Input tensor (used to determine vocab_size)
+        targets: Target tensor (used to determine output vocab_size)
+        device: Device to place layers on
+
+    Returns:
+        (embedding, lm_head) tuple of nn.Module layers
+    """
+    vocab_size = max(inputs.max().item(), targets.max().item()) + 1
+    d_model = model.d_model if hasattr(model, 'd_model') else DEFAULT_D_MODEL
+    embedding = nn.Embedding(vocab_size, d_model).to(device)
+    lm_head = nn.Linear(d_model, vocab_size).to(device)
+    return embedding, lm_head
+
+
 @dataclass
 class ModelConfig:
     """Configuration for model building."""
@@ -216,6 +241,8 @@ class TrainingHarness:
         step = 0
         running_loss = 0.0
         final_loss = float('inf')
+        embedding = None
+        lm_head = None
 
         try:
             data_iter = iter(dataloader)
@@ -238,30 +265,15 @@ class TrainingHarness:
                 inputs = inputs.to(device)
                 targets = targets.to(device)
 
-                # Forward pass - model expects [batch, seq_len, d_model] but we have tokens
-                # We need an embedding layer - check if model has one
                 optimizer.zero_grad()
 
-                # Try to run forward pass
-                # The generated models expect already-embedded input
-                # So we create a simple embedding here
-                if not hasattr(self, '_embedding'):
-                    vocab_size = inputs.max().item() + 1
-                    d_model = model.d_model if hasattr(model, 'd_model') else 128
-                    self._embedding = nn.Embedding(vocab_size, d_model).to(device)
+                # Create embedding/head on first batch
+                if embedding is None:
+                    embedding, lm_head = _create_embedding_and_head(model, inputs, targets, device)
 
-                embedded = self._embedding(inputs)
+                embedded = embedding(inputs)
                 outputs = model(embedded)
-
-                # Compute loss - outputs should be [batch, seq_len, vocab_size] for LM
-                # But our simple models output [batch, seq_len, d_model]
-                # We need a final projection
-                if not hasattr(self, '_lm_head'):
-                    d_model = outputs.shape[-1]
-                    vocab_size = targets.max().item() + 1
-                    self._lm_head = nn.Linear(d_model, vocab_size).to(device)
-
-                logits = self._lm_head(outputs)
+                logits = lm_head(outputs)
                 loss = F.cross_entropy(
                     logits.view(-1, logits.size(-1)),
                     targets.view(-1)
@@ -317,8 +329,6 @@ class BenchmarkRunner:
 
         total_loss = 0.0
         num_batches = 0
-
-        # Create temp embedding/head if needed
         embedding = None
         lm_head = None
 
@@ -327,19 +337,12 @@ class BenchmarkRunner:
                 inputs = inputs.to(device)
                 targets = targets.to(device)
 
+                # Create embedding/head on first batch
                 if embedding is None:
-                    vocab_size = max(inputs.max().item(), targets.max().item()) + 1
-                    d_model = model.d_model if hasattr(model, 'd_model') else 128
-                    embedding = nn.Embedding(vocab_size, d_model).to(device)
+                    embedding, lm_head = _create_embedding_and_head(model, inputs, targets, device)
 
                 embedded = embedding(inputs)
                 outputs = model(embedded)
-
-                if lm_head is None:
-                    d_model = outputs.shape[-1]
-                    vocab_size = targets.max().item() + 1
-                    lm_head = nn.Linear(d_model, vocab_size).to(device)
-
                 logits = lm_head(outputs)
                 loss = F.cross_entropy(
                     logits.view(-1, logits.size(-1)),
