@@ -18,7 +18,8 @@ from typing import Optional
 try:
     import modal
     HAS_MODAL = True
-except ImportError:
+except (ImportError, RuntimeError):
+    # RuntimeError raised if Python version not supported
     HAS_MODAL = False
     modal = None
 
