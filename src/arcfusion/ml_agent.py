@@ -249,17 +249,6 @@ class MLAgent:
             if verbose:
                 print(f"  [ADJ] Train error: {validation.train_error}")
 
-        # Record parameter adjustments if d_model or vocab_size changed
-        if hasattr(self.pipeline, 'model_config'):
-            cfg = self.pipeline.model_config
-            # Check if we used different params than assembly suggested
-            assembly_shapes = recipe.assembly.get('shapes', {})
-            for cid, shapes in assembly_shapes.items():
-                if 'd_model' in str(shapes):
-                    # Assembly specified a d_model - check if we changed it
-                    # This is a simplified check; real impl would parse the shape
-                    pass
-
         # Populate result
         result.success = validation.success
         result.num_parameters = validation.num_parameters

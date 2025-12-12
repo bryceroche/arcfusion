@@ -8,12 +8,11 @@ Usage:
     from arcfusion.cloud import CloudTrainer
 
     trainer = CloudTrainer()
-    result = trainer.train_remote(generated_code, config)
+    result = trainer.train(generated_code, model_name, config)
 """
 
 from dataclasses import dataclass, field
 from typing import Optional
-import json
 
 # Check for Modal availability
 try:
