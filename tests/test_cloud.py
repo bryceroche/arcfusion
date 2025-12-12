@@ -13,7 +13,7 @@ class TestCloudConfig:
         config = CloudConfig()
         assert config.gpu_type == "T4"
         assert config.timeout_seconds == 600
-        assert config.max_steps == 500
+        assert config.max_steps == 2000
         assert config.batch_size == 16
         assert config.d_model == 256
         assert config.vocab_size == 8000
@@ -150,7 +150,7 @@ class TestCloudModuleImport:
         assert APP_NAME == "arcfusion-trainer"
         assert GPU_TYPE == "T4"
         assert TIMEOUT_SECONDS == 600
-        assert CLOUD_DEFAULT_STEPS == 500
+        assert CLOUD_DEFAULT_STEPS == 2000
 
 
 class TestCloudTrainerInit:

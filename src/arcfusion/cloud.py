@@ -30,7 +30,9 @@ TIMEOUT_SECONDS = 600  # 10 minute max per training run
 IMAGE_PYTHON_VERSION = "3.11"
 
 # Training defaults for cloud runs
-CLOUD_DEFAULT_STEPS = 500
+# Note: Research shows 2000+ steps needed to differentiate architecture quality
+# See experiments/training_scale.py and ideas.md for details
+CLOUD_DEFAULT_STEPS = 2000
 CLOUD_DEFAULT_BATCH_SIZE = 16
 CLOUD_DEFAULT_D_MODEL = 256
 CLOUD_DEFAULT_VOCAB_SIZE = 8000
