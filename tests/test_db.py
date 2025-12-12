@@ -12,6 +12,7 @@ from arcfusion import (
     seed_transformers,
     seed_modern_architectures,
 )
+from arcfusion.db import Recipe, RecipeAdjustment
 
 
 @pytest.fixture
@@ -130,3 +131,164 @@ def test_stats(seeded_db):
     stats = seeded_db.stats()
     assert stats['components'] > 0
     assert stats['engines'] > 0
+
+
+# Recipe tests
+def test_add_recipe(db):
+    """Test adding and retrieving a recipe."""
+    recipe = Recipe(
+        name="TestRecipe",
+        component_ids=["comp1", "comp2", "comp3"],
+        assembly={
+            "connections": [("comp1", "comp2"), ("comp2", "comp3")],
+            "residuals": [("comp1", "comp3")],
+            "shapes": {"comp1": {"in": "[b,n,d]", "out": "[b,n,d]"}}
+        },
+        strategy="greedy",
+        estimated_score=0.85
+    )
+    recipe_id = db.add_recipe(recipe)
+    assert recipe_id == recipe.recipe_id
+
+    retrieved = db.get_recipe(recipe_id)
+    assert retrieved.name == "TestRecipe"
+    assert retrieved.component_ids == ["comp1", "comp2", "comp3"]
+    assert retrieved.strategy == "greedy"
+    assert retrieved.estimated_score == 0.85
+    assert len(retrieved.assembly["connections"]) == 2
+
+
+def test_list_recipes(db):
+    """Test listing recipes with filters."""
+    # Add multiple recipes
+    for i in range(3):
+        recipe = Recipe(
+            name=f"Recipe{i}",
+            component_ids=[f"comp{i}"],
+            assembly={"connections": []},
+            strategy="greedy" if i % 2 == 0 else "random",
+            estimated_score=0.5 + (i * 0.1)
+        )
+        db.add_recipe(recipe)
+
+    # List all
+    all_recipes = db.list_recipes()
+    assert len(all_recipes) == 3
+
+    # Filter by strategy
+    greedy_recipes = db.list_recipes(strategy="greedy")
+    assert len(greedy_recipes) == 2
+
+    # Filter by score
+    high_score = db.list_recipes(min_score=0.6)
+    assert len(high_score) == 2
+
+
+def test_delete_recipe(db):
+    """Test deleting a recipe and its adjustments."""
+    recipe = Recipe(
+        name="ToDelete",
+        component_ids=["comp1"],
+        assembly={},
+        strategy="greedy"
+    )
+    recipe_id = db.add_recipe(recipe)
+
+    # Add an adjustment
+    adj = RecipeAdjustment(
+        recipe_id=recipe_id,
+        adjustment_type="shape_fix",
+        original_value="512",
+        adjusted_value="128",
+        reason="Memory constraint"
+    )
+    db.add_adjustment(adj)
+
+    # Verify both exist
+    assert db.get_recipe(recipe_id) is not None
+    assert len(db.get_adjustments(recipe_id)) == 1
+
+    # Delete recipe (should cascade to adjustments)
+    result = db.delete_recipe(recipe_id)
+    assert result is True
+    assert db.get_recipe(recipe_id) is None
+    assert len(db.get_adjustments(recipe_id)) == 0
+
+
+def test_add_adjustment(db):
+    """Test adding and retrieving recipe adjustments."""
+    recipe = Recipe(
+        name="AdjustmentTest",
+        component_ids=["comp1"],
+        assembly={},
+        strategy="greedy"
+    )
+    recipe_id = db.add_recipe(recipe)
+
+    adj = RecipeAdjustment(
+        recipe_id=recipe_id,
+        adjustment_type="shape_fix",
+        original_value="[batch, seq, 512]",
+        adjusted_value="[batch, seq, 128]",
+        reason="Reduced d_model to fit memory",
+        component_id="comp1"
+    )
+    adj_id = db.add_adjustment(adj)
+    assert adj_id == adj.adjustment_id
+
+    adjustments = db.get_adjustments(recipe_id)
+    assert len(adjustments) == 1
+    assert adjustments[0].adjustment_type == "shape_fix"
+    assert adjustments[0].original_value == "[batch, seq, 512]"
+    assert adjustments[0].reason == "Reduced d_model to fit memory"
+
+
+def test_adjustment_stats(db):
+    """Test getting adjustment statistics."""
+    recipe = Recipe(
+        name="StatsTest",
+        component_ids=["comp1"],
+        assembly={},
+        strategy="greedy"
+    )
+    recipe_id = db.add_recipe(recipe)
+
+    # Add various adjustment types
+    for i, adj_type in enumerate(["shape_fix", "shape_fix", "param_change", "skip_component"]):
+        adj = RecipeAdjustment(
+            recipe_id=recipe_id,
+            adjustment_type=adj_type,
+            original_value=f"orig{i}",
+            adjusted_value=f"adj{i}",
+            reason=f"reason{i}"
+        )
+        db.add_adjustment(adj)
+
+    stats = db.get_adjustment_stats()
+    assert stats["shape_fix"] == 2
+    assert stats["param_change"] == 1
+    assert stats["skip_component"] == 1
+
+
+def test_recipe_in_stats(db):
+    """Test that recipes appear in DB stats."""
+    recipe = Recipe(
+        name="StatsRecipe",
+        component_ids=["comp1"],
+        assembly={},
+        strategy="greedy"
+    )
+    db.add_recipe(recipe)
+
+    adj = RecipeAdjustment(
+        recipe_id=recipe.recipe_id,
+        adjustment_type="test",
+        original_value="a",
+        adjusted_value="b",
+        reason="test"
+    )
+    db.add_adjustment(adj)
+
+    stats = db.stats()
+    assert stats["recipes"] == 1
+    assert stats["recipe_adjustments"] == 1

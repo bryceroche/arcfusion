@@ -156,6 +156,59 @@ class ComponentConfiguration:
             self.component_ids = []
 
 
+@dataclass
+class Recipe:
+    """
+    A dreamed architecture recipe from Composer to ML Agent.
+
+    Contains ordered components plus assembly instructions that tell
+    the ML Agent how to wire them together.
+    """
+    name: str
+    component_ids: list  # Ordered list of component IDs
+    assembly: dict  # Assembly instructions: connections, residuals, shapes
+    strategy: str = ""  # Dream strategy used: greedy, random, crossover, mutate
+    estimated_score: float = 0.0
+    parent_engine_ids: list = field(default_factory=list)  # For crossover/mutate
+    notes: str = ""
+    recipe_id: str = ""
+    created_at: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.recipe_id:
+            content = f"{self.name}{json.dumps(self.component_ids, sort_keys=True)}{json.dumps(self.assembly, sort_keys=True)}"
+            self.recipe_id = hashlib.sha256(content.encode()).hexdigest()[:12]
+        if self.component_ids is None:
+            self.component_ids = []
+        if self.assembly is None:
+            self.assembly = {}
+        if self.parent_engine_ids is None:
+            self.parent_engine_ids = []
+
+
+@dataclass
+class RecipeAdjustment:
+    """
+    Tracks modifications made by ML Agent during training.
+
+    When the ML Agent needs to deviate from the recipe to enable training,
+    each adjustment is recorded here for reproducibility and composer feedback.
+    """
+    recipe_id: str
+    adjustment_type: str  # e.g., "shape_fix", "layer_add", "param_change", "skip_component"
+    original_value: str  # What the recipe specified
+    adjusted_value: str  # What was actually used
+    reason: str  # Why the adjustment was needed
+    component_id: str = ""  # Which component was affected (if applicable)
+    adjustment_id: str = ""
+    created_at: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.adjustment_id:
+            content = f"{self.recipe_id}{self.adjustment_type}{self.original_value}{self.adjusted_value}"
+            self.adjustment_id = hashlib.sha256(content.encode()).hexdigest()[:12]
+
+
 class ArcFusionDB:
     """SQLite database for ML architecture components and engines"""
 
@@ -286,6 +339,33 @@ class ArcFusionDB:
                 FOREIGN KEY (source_engine_id) REFERENCES engines(engine_id)
             );
 
+            -- Recipes: Composer output for ML Agent
+            CREATE TABLE IF NOT EXISTS recipes (
+                recipe_id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                component_ids TEXT NOT NULL,
+                assembly TEXT NOT NULL,
+                strategy TEXT,
+                estimated_score REAL DEFAULT 0.0,
+                parent_engine_ids TEXT,
+                notes TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+
+            -- Recipe adjustments: ML Agent modifications during training
+            CREATE TABLE IF NOT EXISTS recipe_adjustments (
+                adjustment_id TEXT PRIMARY KEY,
+                recipe_id TEXT NOT NULL,
+                adjustment_type TEXT NOT NULL,
+                original_value TEXT NOT NULL,
+                adjusted_value TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                component_id TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (recipe_id) REFERENCES recipes(recipe_id),
+                FOREIGN KEY (component_id) REFERENCES components(component_id)
+            );
+
             -- Indexes
             CREATE INDEX IF NOT EXISTS idx_comp_usefulness ON components(usefulness_score DESC);
             CREATE INDEX IF NOT EXISTS idx_comp_complexity ON components(time_complexity);
@@ -301,6 +381,10 @@ class ArcFusionDB:
             CREATE INDEX IF NOT EXISTS idx_config_score ON component_configurations(config_score DESC);
             CREATE INDEX IF NOT EXISTS idx_config_usage ON component_configurations(usage_count DESC);
             CREATE INDEX IF NOT EXISTS idx_config_validated ON component_configurations(validated);
+            CREATE INDEX IF NOT EXISTS idx_recipe_strategy ON recipes(strategy);
+            CREATE INDEX IF NOT EXISTS idx_recipe_score ON recipes(estimated_score DESC);
+            CREATE INDEX IF NOT EXISTS idx_adjustment_recipe ON recipe_adjustments(recipe_id);
+            CREATE INDEX IF NOT EXISTS idx_adjustment_type ON recipe_adjustments(adjustment_type);
         """)
         self.conn.commit()
 
@@ -905,6 +989,149 @@ class ArcFusionDB:
         return [self._row_to_configuration(r) for r in rows]
 
     # -------------------------------------------------------------------------
+    # Recipe operations
+    # -------------------------------------------------------------------------
+    def add_recipe(self, recipe: Recipe) -> str:
+        """Add a recipe (Composer output for ML Agent)."""
+        self.conn.execute("""
+            INSERT OR REPLACE INTO recipes
+            (recipe_id, name, component_ids, assembly, strategy, estimated_score, parent_engine_ids, notes)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            recipe.recipe_id,
+            recipe.name,
+            json.dumps(recipe.component_ids),
+            json.dumps(recipe.assembly),
+            recipe.strategy or None,
+            recipe.estimated_score,
+            _to_json(recipe.parent_engine_ids),
+            recipe.notes or None
+        ))
+        self.conn.commit()
+        return recipe.recipe_id
+
+    def get_recipe(self, recipe_id: str) -> Optional[Recipe]:
+        """Retrieve a recipe by ID."""
+        row = self.conn.execute(
+            "SELECT * FROM recipes WHERE recipe_id = ?", (recipe_id,)
+        ).fetchone()
+        if row:
+            return self._row_to_recipe(row)
+        return None
+
+    def _row_to_recipe(self, row: sqlite3.Row) -> Recipe:
+        """Convert a database row to a Recipe object."""
+        return Recipe(
+            recipe_id=row['recipe_id'],
+            name=row['name'],
+            component_ids=self._safe_json_loads(row['component_ids'], []),
+            assembly=self._safe_json_loads(row['assembly'], {}),
+            strategy=row['strategy'] or "",
+            estimated_score=row['estimated_score'] or 0.0,
+            parent_engine_ids=self._safe_json_loads(row['parent_engine_ids'], []),
+            notes=row['notes'] or "",
+            created_at=row['created_at'] or ""
+        )
+
+    def list_recipes(
+        self,
+        strategy: Optional[str] = None,
+        min_score: Optional[float] = None,
+        limit: int = 100
+    ) -> list[Recipe]:
+        """List recipes with optional filters."""
+        query = "SELECT * FROM recipes WHERE 1=1"
+        params = []
+        if strategy:
+            query += " AND strategy = ?"
+            params.append(strategy)
+        if min_score is not None:
+            query += " AND estimated_score >= ?"
+            params.append(min_score)
+        query += " ORDER BY estimated_score DESC, created_at DESC LIMIT ?"
+        params.append(limit)
+
+        rows = self.conn.execute(query, params).fetchall()
+        return [self._row_to_recipe(r) for r in rows]
+
+    def delete_recipe(self, recipe_id: str) -> bool:
+        """Delete a recipe and its adjustments."""
+        # First delete adjustments
+        self.conn.execute(
+            "DELETE FROM recipe_adjustments WHERE recipe_id = ?",
+            (recipe_id,)
+        )
+        # Then delete recipe
+        cursor = self.conn.execute(
+            "DELETE FROM recipes WHERE recipe_id = ?",
+            (recipe_id,)
+        )
+        self.conn.commit()
+        return cursor.rowcount > 0
+
+    # -------------------------------------------------------------------------
+    # Recipe adjustment operations
+    # -------------------------------------------------------------------------
+    def add_adjustment(self, adjustment: RecipeAdjustment) -> str:
+        """Record an adjustment made by ML Agent during training."""
+        self.conn.execute("""
+            INSERT OR REPLACE INTO recipe_adjustments
+            (adjustment_id, recipe_id, adjustment_type, original_value, adjusted_value, reason, component_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (
+            adjustment.adjustment_id,
+            adjustment.recipe_id,
+            adjustment.adjustment_type,
+            adjustment.original_value,
+            adjustment.adjusted_value,
+            adjustment.reason,
+            adjustment.component_id or None
+        ))
+        self.conn.commit()
+        return adjustment.adjustment_id
+
+    def get_adjustments(self, recipe_id: str) -> list[RecipeAdjustment]:
+        """Get all adjustments for a recipe."""
+        rows = self.conn.execute(
+            "SELECT * FROM recipe_adjustments WHERE recipe_id = ? ORDER BY created_at",
+            (recipe_id,)
+        ).fetchall()
+        return [self._row_to_adjustment(r) for r in rows]
+
+    def _row_to_adjustment(self, row: sqlite3.Row) -> RecipeAdjustment:
+        """Convert a database row to a RecipeAdjustment object."""
+        return RecipeAdjustment(
+            adjustment_id=row['adjustment_id'],
+            recipe_id=row['recipe_id'],
+            adjustment_type=row['adjustment_type'],
+            original_value=row['original_value'],
+            adjusted_value=row['adjusted_value'],
+            reason=row['reason'],
+            component_id=row['component_id'] or "",
+            created_at=row['created_at'] or ""
+        )
+
+    def list_adjustments_by_type(self, adjustment_type: str, limit: int = 100) -> list[RecipeAdjustment]:
+        """List all adjustments of a specific type (useful for Composer learning)."""
+        rows = self.conn.execute("""
+            SELECT * FROM recipe_adjustments
+            WHERE adjustment_type = ?
+            ORDER BY created_at DESC
+            LIMIT ?
+        """, (adjustment_type, limit)).fetchall()
+        return [self._row_to_adjustment(r) for r in rows]
+
+    def get_adjustment_stats(self) -> dict:
+        """Get statistics about adjustments (helps identify common issues)."""
+        rows = self.conn.execute("""
+            SELECT adjustment_type, COUNT(*) as count
+            FROM recipe_adjustments
+            GROUP BY adjustment_type
+            ORDER BY count DESC
+        """).fetchall()
+        return {r['adjustment_type']: r['count'] for r in rows}
+
+    # -------------------------------------------------------------------------
     # Component compatibility operations (aggregate scores)
     # -------------------------------------------------------------------------
     def update_compatibility_scores(self):
@@ -951,6 +1178,8 @@ class ArcFusionDB:
             'benchmark_types': self.conn.execute("SELECT COUNT(DISTINCT benchmark_name) FROM benchmark_results").fetchone()[0],
             'dreamed_engines': self.conn.execute("SELECT COUNT(*) FROM dreamed_engines").fetchone()[0],
             'validated_dreams': self.conn.execute("SELECT COUNT(*) FROM dreamed_engines WHERE validated = 1").fetchone()[0],
+            'recipes': self.conn.execute("SELECT COUNT(*) FROM recipes").fetchone()[0],
+            'recipe_adjustments': self.conn.execute("SELECT COUNT(*) FROM recipe_adjustments").fetchone()[0],
         }
 
     def close(self):

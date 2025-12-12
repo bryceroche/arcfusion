@@ -10,7 +10,7 @@ Strategies:
 
 import random
 import re
-from .db import ArcFusionDB, Component
+from .db import ArcFusionDB, Component, Recipe
 
 
 # Component categories and their typical ordering in an architecture
@@ -552,6 +552,158 @@ class EngineComposer:
 
         estimated_score = min(1.0, base_score + interface_bonus + diversity_bonus + pair_bonus + config_bonus)
         return components, estimated_score
+
+    def create_recipe(
+        self,
+        name: str,
+        strategy: str = "greedy",
+        save_to_db: bool = True,
+        **kwargs
+    ) -> Recipe:
+        """
+        Dream up a new architecture and create a Recipe for the ML Agent.
+
+        The Recipe contains:
+        - Ordered list of component IDs
+        - Assembly instructions (connections, residuals, shapes)
+        - Strategy metadata for reproducibility
+
+        Args:
+            name: Name for the recipe
+            strategy: Dream strategy to use
+            save_to_db: Whether to store the recipe in the database
+            **kwargs: Additional args passed to dream()
+
+        Returns:
+            Recipe object ready for ML Agent execution
+
+        Raises:
+            ValueError: If strategy is unknown or composition fails
+        """
+        components, estimated_score = self.dream(strategy, **kwargs)
+
+        if not components:
+            raise ValueError(f"Failed to compose architecture with strategy '{strategy}'")
+
+        # Build assembly instructions
+        assembly = self._build_assembly_instructions(components)
+
+        # Track parent engines for crossover/mutate
+        parent_engine_ids = []
+        if strategy == "crossover":
+            e1 = self.db.get_engine_by_name(kwargs.get("engine1_name", ""))
+            e2 = self.db.get_engine_by_name(kwargs.get("engine2_name", ""))
+            if e1:
+                parent_engine_ids.append(e1.engine_id)
+            if e2:
+                parent_engine_ids.append(e2.engine_id)
+        elif strategy == "mutate":
+            e = self.db.get_engine_by_name(kwargs.get("engine_name", ""))
+            if e:
+                parent_engine_ids.append(e.engine_id)
+
+        recipe = Recipe(
+            name=name,
+            component_ids=[c.component_id for c in components],
+            assembly=assembly,
+            strategy=strategy,
+            estimated_score=estimated_score,
+            parent_engine_ids=parent_engine_ids,
+            notes=f"Dreamed with {strategy} strategy"
+        )
+
+        if save_to_db:
+            self.db.add_recipe(recipe)
+
+        return recipe
+
+    def _build_assembly_instructions(self, components: list[Component]) -> dict:
+        """
+        Build assembly instructions for how components should be wired together.
+
+        Returns:
+            dict with:
+            - connections: List of (from_id, to_id) tuples showing data flow
+            - residuals: List of (from_id, to_id) tuples for skip connections
+            - shapes: Dict mapping component_id to expected I/O shapes
+            - categories: Dict mapping component_id to its category
+            - notes: List of assembly hints for the ML Agent
+        """
+        if not components:
+            return {}
+
+        connections = []
+        residuals = []
+        shapes = {}
+        categories = {}
+        notes = []
+
+        # Build sequential connections
+        for i, comp in enumerate(components):
+            categories[comp.component_id] = get_component_category(comp)
+
+            # Record shapes
+            shapes[comp.component_id] = {
+                'in': comp.interface_in.get('shape', 'variable') if comp.interface_in else 'variable',
+                'out': comp.interface_out.get('shape', 'variable') if comp.interface_out else 'variable'
+            }
+
+            # Connect to next component
+            if i < len(components) - 1:
+                next_comp = components[i + 1]
+                connections.append((comp.component_id, next_comp.component_id))
+
+        # Detect residual connection opportunities
+        # Look for layer norm or attention followed by FFN (classic transformer pattern)
+        for i, comp in enumerate(components):
+            cat = categories[comp.component_id]
+
+            # Residual around attention blocks
+            if cat == 'attention' and i > 0:
+                prev_comp = components[i - 1]
+                # Add residual from before attention to after attention
+                residuals.append((prev_comp.component_id, comp.component_id))
+                notes.append(f"Residual connection around {comp.name}")
+
+            # Residual around FFN blocks
+            if cat == 'layer' and 'feed' in comp.name.lower():
+                # Look back for a norm or attention to skip from
+                for j in range(i - 1, max(0, i - 3), -1):
+                    prev = components[j]
+                    if categories[prev.component_id] in ('attention', 'layer'):
+                        residuals.append((prev.component_id, comp.component_id))
+                        notes.append(f"Residual connection around {comp.name}")
+                        break
+
+        # Add architecture-level notes
+        cat_set = set(categories.values())
+        if 'embedding' in cat_set and 'output' in cat_set:
+            notes.append("Complete architecture with embedding and output layers")
+        if 'attention' in cat_set:
+            notes.append("Contains attention mechanism - consider causal masking for autoregressive")
+        if 'efficiency' in cat_set:
+            notes.append("Contains efficiency optimizations - may require special handling")
+
+        return {
+            'connections': connections,
+            'residuals': residuals,
+            'shapes': shapes,
+            'categories': categories,
+            'notes': notes
+        }
+
+    def recipe_to_components(self, recipe: Recipe) -> list[Component]:
+        """
+        Convert a Recipe back to a list of Component objects.
+
+        Useful for code generation or validation.
+        """
+        components = []
+        for cid in recipe.component_ids:
+            comp = self.db.get_component(cid)
+            if comp:
+                components.append(comp)
+        return components
 
     # -------------------------------------------------------------------------
     # Configuration extraction and management

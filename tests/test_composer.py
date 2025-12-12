@@ -338,3 +338,103 @@ class TestCompatibilityScore:
         # Reverse order should score lower (no category bonus)
         score_reverse = composer.get_compatibility_score(attn, pos)
         assert score_correct >= score_reverse
+
+
+class TestCreateRecipe:
+    """Test recipe creation for ML Agent handoff."""
+
+    def test_create_recipe_greedy(self, db):
+        composer = EngineComposer(db)
+        recipe = composer.create_recipe(name="GreedyRecipe", strategy="greedy")
+
+        assert recipe.name == "GreedyRecipe"
+        assert recipe.strategy == "greedy"
+        assert len(recipe.component_ids) > 0
+        assert recipe.estimated_score > 0
+        assert "connections" in recipe.assembly
+        assert "categories" in recipe.assembly
+
+    def test_create_recipe_random(self, db):
+        composer = EngineComposer(db)
+        recipe = composer.create_recipe(name="RandomRecipe", strategy="random", steps=4)
+
+        assert recipe.name == "RandomRecipe"
+        assert recipe.strategy == "random"
+        assert len(recipe.component_ids) > 0
+
+    def test_create_recipe_crossover(self, db):
+        composer = EngineComposer(db)
+        recipe = composer.create_recipe(
+            name="CrossoverRecipe",
+            strategy="crossover",
+            engine1_name="Transformer",
+            engine2_name="LLaMA"
+        )
+
+        assert recipe.name == "CrossoverRecipe"
+        assert recipe.strategy == "crossover"
+        assert len(recipe.parent_engine_ids) == 2
+
+    def test_create_recipe_mutate(self, db):
+        composer = EngineComposer(db)
+        recipe = composer.create_recipe(
+            name="MutateRecipe",
+            strategy="mutate",
+            engine_name="Transformer"
+        )
+
+        assert recipe.name == "MutateRecipe"
+        assert recipe.strategy == "mutate"
+        assert len(recipe.parent_engine_ids) == 1
+
+    def test_create_recipe_saves_to_db(self, db):
+        composer = EngineComposer(db)
+        recipe = composer.create_recipe(name="SavedRecipe", strategy="greedy", save_to_db=True)
+
+        # Should be in database
+        fetched = db.get_recipe(recipe.recipe_id)
+        assert fetched is not None
+        assert fetched.name == "SavedRecipe"
+
+    def test_create_recipe_no_save(self, db):
+        composer = EngineComposer(db)
+        initial_count = len(db.list_recipes())
+
+        recipe = composer.create_recipe(name="NotSavedRecipe", strategy="greedy", save_to_db=False)
+
+        # Should NOT be in database
+        assert len(db.list_recipes()) == initial_count
+        assert db.get_recipe(recipe.recipe_id) is None
+
+    def test_create_recipe_assembly_has_connections(self, db):
+        composer = EngineComposer(db)
+        recipe = composer.create_recipe(name="AssemblyTest", strategy="greedy")
+
+        # Should have connections between components
+        connections = recipe.assembly.get("connections", [])
+        assert len(connections) == len(recipe.component_ids) - 1
+
+    def test_create_recipe_assembly_has_shapes(self, db):
+        composer = EngineComposer(db)
+        recipe = composer.create_recipe(name="ShapesTest", strategy="greedy")
+
+        shapes = recipe.assembly.get("shapes", {})
+        # Each component should have shape info
+        assert len(shapes) == len(recipe.component_ids)
+
+    def test_create_recipe_assembly_has_notes(self, db):
+        composer = EngineComposer(db)
+        recipe = composer.create_recipe(name="NotesTest", strategy="greedy")
+
+        notes = recipe.assembly.get("notes", [])
+        # Should have at least one assembly note
+        assert len(notes) > 0
+
+    def test_recipe_to_components(self, db):
+        composer = EngineComposer(db)
+        recipe = composer.create_recipe(name="ConvertTest", strategy="greedy")
+
+        # Convert back to components
+        components = composer.recipe_to_components(recipe)
+        assert len(components) == len(recipe.component_ids)
+        assert all(c.component_id in recipe.component_ids for c in components)
