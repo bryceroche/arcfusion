@@ -41,17 +41,20 @@ CONFIG = {
     "max_steps": 2000,  # Fewer steps but on real data
     "eval_interval": 200,
     "mixed_precision": True,  # Use FP16 autocast + GradScaler
-    "gpu": "A10G",  # A10G has better FP16 perf than T4
+    "gpu": "A10G",  # Default GPU for experiments
     "dataset": "wikitext-2",  # Real text data
+    "seed": 42,  # Default seed (overridden for baselines)
 }
 
-# Baseline model - always trained first for comparison
+# Baseline configuration
 BASELINE_MODEL = "Transformer_MHA"
+BASELINE_GPU = "A10G"  # Use A10G for baseline (same as experiments for consistency)
+BASELINE_TARGET_RUNS = 3  # How many baseline runs to average
+BASELINE_SEEDS = [42, 123, 456]  # Seeds for baseline runs
 
 
-@app.function(image=image, gpu="A10G", timeout=600)
-def train_model(code: str, model_name: str, config: dict) -> dict:
-    """Train a model on WikiText-2 with mixed precision."""
+def _train_model_impl(code: str, model_name: str, config: dict, gpu_type: str) -> dict:
+    """Internal training implementation - shared by A10G and A100 functions."""
     import time
     import math
     import torch
@@ -61,6 +64,12 @@ def train_model(code: str, model_name: str, config: dict) -> dict:
     import tiktoken
 
     use_amp = config.get("mixed_precision", True)
+    seed = config.get("seed", 42)
+
+    # Set random seeds for reproducibility
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
     result = {
         "success": False,
@@ -72,16 +81,17 @@ def train_model(code: str, model_name: str, config: dict) -> dict:
         "time_seconds": 0.0,
         "parameters": 0,
         "error": None,
-        "gpu": config.get("gpu", "A10G"),
+        "gpu": gpu_type,
         "mixed_precision": use_amp,
         "dataset": config.get("dataset", "wikitext-2"),
+        "seed": seed,
     }
 
     start = time.time()
 
     try:
         # Load and tokenize WikiText-2
-        print("Loading WikiText-2 dataset...")
+        print(f"Loading WikiText-2 dataset (seed={seed})...")
         ds = load_dataset("wikitext", "wikitext-2-raw-v1")
         enc = tiktoken.get_encoding("gpt2")
 
@@ -201,6 +211,336 @@ def train_model(code: str, model_name: str, config: dict) -> dict:
             result["final_train_loss"] = loss.item()
 
         # Final evaluation on test set
+        result["eval_loss"] = evaluate(test_loader, max_batches=100)
+        result["perplexity"] = math.exp(min(result["eval_loss"], 20))
+        result["success"] = True
+        print(f"Final test perplexity: {result['perplexity']:.2f}")
+
+    except Exception as e:
+        import traceback
+        result["error"] = f"{e}\n{traceback.format_exc()}"
+
+    result["time_seconds"] = time.time() - start
+    return result
+
+
+@app.function(image=image, gpu="A10G", timeout=1800)
+def train_model(code: str, model_name: str, config: dict) -> dict:
+    """Train model on A10G GPU (default for experiments)."""
+    import time
+    import math
+    import torch
+    import torch.nn as nn
+    from torch.utils.data import DataLoader, Dataset
+    from datasets import load_dataset
+    import tiktoken
+
+    gpu_type = "A10G"
+    use_amp = config.get("mixed_precision", True)
+    seed = config.get("seed", 42)
+
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+    result = {
+        "success": False,
+        "model_name": model_name,
+        "final_train_loss": float("inf"),
+        "eval_loss": float("inf"),
+        "perplexity": float("inf"),
+        "steps": 0,
+        "time_seconds": 0.0,
+        "parameters": 0,
+        "error": None,
+        "gpu": gpu_type,
+        "mixed_precision": use_amp,
+        "dataset": config.get("dataset", "wikitext-2"),
+        "seed": seed,
+    }
+
+    start = time.time()
+
+    try:
+        print(f"Loading WikiText-2 dataset (seed={seed})...")
+        ds = load_dataset("wikitext", "wikitext-2-raw-v1")
+        enc = tiktoken.get_encoding("gpt2")
+
+        def tokenize_split(split_name):
+            texts = [t for t in ds[split_name]['text'] if t.strip()]
+            all_tokens = []
+            for text in texts:
+                all_tokens.extend(enc.encode(text))
+            return all_tokens
+
+        train_tokens = tokenize_split('train')
+        val_tokens = tokenize_split('validation')
+        test_tokens = tokenize_split('test')
+        print(f"Tokens: train={len(train_tokens):,}, val={len(val_tokens):,}, test={len(test_tokens):,}")
+
+        class TokenDataset(Dataset):
+            def __init__(self, tokens, seq_len):
+                self.tokens = torch.tensor(tokens, dtype=torch.long)
+                self.seq_len = seq_len
+
+            def __len__(self):
+                return max(0, len(self.tokens) - self.seq_len - 1)
+
+            def __getitem__(self, idx):
+                chunk = self.tokens[idx:idx + self.seq_len + 1]
+                return chunk[:-1], chunk[1:]
+
+        seq_len = config["seq_len"]
+        batch_size = config["batch_size"]
+        train_ds = TokenDataset(train_tokens, seq_len)
+        val_ds = TokenDataset(val_tokens, seq_len)
+        test_ds = TokenDataset(test_tokens, seq_len)
+
+        train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, drop_last=True)
+        val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, drop_last=True)
+        test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, drop_last=True)
+
+        ns = {}
+        exec(code, ns)
+        model_class = ns.get(model_name)
+        if not model_class:
+            result["error"] = f"Class {model_name} not found"
+            return result
+
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        amp_status = "with mixed precision (FP16)" if use_amp else "with FP32"
+        print(f"Training {model_name} on {device} {amp_status}")
+
+        model = model_class(
+            d_model=config["d_model"],
+            vocab_size=config["vocab_size"],
+            n_layers=config["n_layers"],
+            n_heads=config["n_heads"],
+        ).to(device)
+
+        result["parameters"] = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        print(f"Parameters: {result['parameters']:,}")
+
+        optimizer = torch.optim.AdamW(model.parameters(), lr=config["learning_rate"])
+        criterion = nn.CrossEntropyLoss()
+        scaler = torch.amp.GradScaler('cuda', enabled=use_amp)
+        vocab_size = config["vocab_size"]
+
+        def evaluate(loader, max_batches=50):
+            model.eval()
+            total_loss, total_tokens = 0, 0
+            with torch.no_grad():
+                for i, (x, y) in enumerate(loader):
+                    if i >= max_batches:
+                        break
+                    x, y = x.to(device), y.to(device)
+                    with torch.amp.autocast('cuda', enabled=use_amp):
+                        logits = model(x)
+                        loss = criterion(logits.reshape(-1, vocab_size), y.reshape(-1))
+                    total_loss += loss.item() * y.numel()
+                    total_tokens += y.numel()
+            return total_loss / total_tokens if total_tokens > 0 else float('inf')
+
+        print(f"Training for {config['max_steps']} steps...")
+        step = 0
+        train_iter = iter(train_loader)
+        model.train()
+
+        while step < config["max_steps"]:
+            try:
+                x, y = next(train_iter)
+            except StopIteration:
+                train_iter = iter(train_loader)
+                x, y = next(train_iter)
+
+            x, y = x.to(device), y.to(device)
+            optimizer.zero_grad()
+
+            with torch.amp.autocast('cuda', enabled=use_amp):
+                logits = model(x)
+                loss = criterion(logits.reshape(-1, vocab_size), y.reshape(-1))
+
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            scaler.step(optimizer)
+            scaler.update()
+            step += 1
+
+            if step % config["eval_interval"] == 0:
+                val_loss = evaluate(val_loader)
+                val_ppl = math.exp(min(val_loss, 20))
+                print(f"Step {step}: train_loss={loss.item():.4f}, val_ppl={val_ppl:.2f}")
+                model.train()
+
+            result["steps"] = step
+            result["final_train_loss"] = loss.item()
+
+        result["eval_loss"] = evaluate(test_loader, max_batches=100)
+        result["perplexity"] = math.exp(min(result["eval_loss"], 20))
+        result["success"] = True
+        print(f"Final test perplexity: {result['perplexity']:.2f}")
+
+    except Exception as e:
+        import traceback
+        result["error"] = f"{e}\n{traceback.format_exc()}"
+
+    result["time_seconds"] = time.time() - start
+    return result
+
+
+@app.function(image=image, gpu="A100", timeout=1800)
+def train_model_a100(code: str, model_name: str, config: dict) -> dict:
+    """Train model on A100 GPU (used for baseline runs - faster, train once)."""
+    import time
+    import math
+    import torch
+    import torch.nn as nn
+    from torch.utils.data import DataLoader, Dataset
+    from datasets import load_dataset
+    import tiktoken
+
+    gpu_type = "A100"
+    use_amp = config.get("mixed_precision", True)
+    seed = config.get("seed", 42)
+
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+    result = {
+        "success": False,
+        "model_name": model_name,
+        "final_train_loss": float("inf"),
+        "eval_loss": float("inf"),
+        "perplexity": float("inf"),
+        "steps": 0,
+        "time_seconds": 0.0,
+        "parameters": 0,
+        "error": None,
+        "gpu": gpu_type,
+        "mixed_precision": use_amp,
+        "dataset": config.get("dataset", "wikitext-2"),
+        "seed": seed,
+    }
+
+    start = time.time()
+
+    try:
+        print(f"Loading WikiText-2 dataset (seed={seed})...")
+        ds = load_dataset("wikitext", "wikitext-2-raw-v1")
+        enc = tiktoken.get_encoding("gpt2")
+
+        def tokenize_split(split_name):
+            texts = [t for t in ds[split_name]['text'] if t.strip()]
+            all_tokens = []
+            for text in texts:
+                all_tokens.extend(enc.encode(text))
+            return all_tokens
+
+        train_tokens = tokenize_split('train')
+        val_tokens = tokenize_split('validation')
+        test_tokens = tokenize_split('test')
+        print(f"Tokens: train={len(train_tokens):,}, val={len(val_tokens):,}, test={len(test_tokens):,}")
+
+        class TokenDataset(Dataset):
+            def __init__(self, tokens, seq_len):
+                self.tokens = torch.tensor(tokens, dtype=torch.long)
+                self.seq_len = seq_len
+
+            def __len__(self):
+                return max(0, len(self.tokens) - self.seq_len - 1)
+
+            def __getitem__(self, idx):
+                chunk = self.tokens[idx:idx + self.seq_len + 1]
+                return chunk[:-1], chunk[1:]
+
+        seq_len = config["seq_len"]
+        batch_size = config["batch_size"]
+        train_ds = TokenDataset(train_tokens, seq_len)
+        val_ds = TokenDataset(val_tokens, seq_len)
+        test_ds = TokenDataset(test_tokens, seq_len)
+
+        train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, drop_last=True)
+        val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, drop_last=True)
+        test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, drop_last=True)
+
+        ns = {}
+        exec(code, ns)
+        model_class = ns.get(model_name)
+        if not model_class:
+            result["error"] = f"Class {model_name} not found"
+            return result
+
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        amp_status = "with mixed precision (FP16)" if use_amp else "with FP32"
+        print(f"Training {model_name} on {device} {amp_status}")
+
+        model = model_class(
+            d_model=config["d_model"],
+            vocab_size=config["vocab_size"],
+            n_layers=config["n_layers"],
+            n_heads=config["n_heads"],
+        ).to(device)
+
+        result["parameters"] = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        print(f"Parameters: {result['parameters']:,}")
+
+        optimizer = torch.optim.AdamW(model.parameters(), lr=config["learning_rate"])
+        criterion = nn.CrossEntropyLoss()
+        scaler = torch.amp.GradScaler('cuda', enabled=use_amp)
+        vocab_size = config["vocab_size"]
+
+        def evaluate(loader, max_batches=50):
+            model.eval()
+            total_loss, total_tokens = 0, 0
+            with torch.no_grad():
+                for i, (x, y) in enumerate(loader):
+                    if i >= max_batches:
+                        break
+                    x, y = x.to(device), y.to(device)
+                    with torch.amp.autocast('cuda', enabled=use_amp):
+                        logits = model(x)
+                        loss = criterion(logits.reshape(-1, vocab_size), y.reshape(-1))
+                    total_loss += loss.item() * y.numel()
+                    total_tokens += y.numel()
+            return total_loss / total_tokens if total_tokens > 0 else float('inf')
+
+        print(f"Training for {config['max_steps']} steps...")
+        step = 0
+        train_iter = iter(train_loader)
+        model.train()
+
+        while step < config["max_steps"]:
+            try:
+                x, y = next(train_iter)
+            except StopIteration:
+                train_iter = iter(train_loader)
+                x, y = next(train_iter)
+
+            x, y = x.to(device), y.to(device)
+            optimizer.zero_grad()
+
+            with torch.amp.autocast('cuda', enabled=use_amp):
+                logits = model(x)
+                loss = criterion(logits.reshape(-1, vocab_size), y.reshape(-1))
+
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            scaler.step(optimizer)
+            scaler.update()
+            step += 1
+
+            if step % config["eval_interval"] == 0:
+                val_loss = evaluate(val_loader)
+                val_ppl = math.exp(min(val_loss, 20))
+                print(f"Step {step}: train_loss={loss.item():.4f}, val_ppl={val_ppl:.2f}")
+                model.train()
+
+            result["steps"] = step
+            result["final_train_loss"] = loss.item()
+
         result["eval_loss"] = evaluate(test_loader, max_batches=100)
         result["perplexity"] = math.exp(min(result["eval_loss"], 20))
         result["success"] = True
@@ -443,11 +783,6 @@ def config_hash(config: dict) -> str:
 
 def result_to_training_run(result: dict, config: dict, baseline_run_id: str = "") -> TrainingRun:
     """Convert Modal result dict to TrainingRun dataclass."""
-    baseline_ppl = None
-    if baseline_run_id:
-        # Will calculate vs_baseline_pct later
-        pass
-
     return TrainingRun(
         model_name=result["model_name"],
         d_model=config["d_model"],
@@ -457,6 +792,7 @@ def result_to_training_run(result: dict, config: dict, baseline_run_id: str = ""
         batch_size=config["batch_size"],
         learning_rate=config["learning_rate"],
         max_steps=config["max_steps"],
+        seed=result.get("seed", config.get("seed", 42)),
         gpu_type=result.get("gpu", config.get("gpu", "A10G")),
         mixed_precision=result.get("mixed_precision", config.get("mixed_precision", True)),
         parameters=result.get("parameters", 0),
@@ -501,6 +837,7 @@ def main():
     print("=" * 70)
     print(f"Config: {CONFIG['n_layers']} layers, d_model={CONFIG['d_model']}, {CONFIG['max_steps']} steps")
     print(f"GPU: {CONFIG['gpu']}, Mixed Precision: {CONFIG['mixed_precision']}")
+    print(f"Baseline: {BASELINE_TARGET_RUNS} runs on {BASELINE_GPU}, seeds={BASELINE_SEEDS}")
     print()
 
     # Open DB connection
@@ -508,70 +845,86 @@ def main():
     print(f"Database: arcfusion.db (training_runs: {db.stats().get('training_runs', 0)} existing)")
 
     results = {}
-    baseline_run_id = ""
-    baseline_ppl = None
+    cfg_hash = config_hash(CONFIG)
 
-    # Check for cached baseline
-    cached_baseline = get_cached_baseline(db, CONFIG)
+    # Check baseline status
+    baseline_stats = db.get_baseline_stats(BASELINE_MODEL, cfg_hash)
+    seeds_needed = db.get_baseline_seeds_needed(BASELINE_TARGET_RUNS, BASELINE_MODEL, cfg_hash)
 
-    if cached_baseline:
+    print(f"\n{'='*70}")
+    print(f"BASELINE STATUS: {BASELINE_MODEL}")
+    print("=" * 70)
+    print(f"  Existing runs: {baseline_stats['n_runs']}/{BASELINE_TARGET_RUNS}")
+    if baseline_stats['n_runs'] > 0:
+        print(f"  Mean perplexity: {baseline_stats['mean_ppl']:.2f}")
+        print(f"  Std deviation:   {baseline_stats['std_ppl']:.2f}")
+        print(f"  Seeds run: {[r['seed'] for r in baseline_stats['runs']]}")
+    if seeds_needed:
+        print(f"  Seeds needed: {seeds_needed}")
+
+    # Train any missing baseline runs
+    if seeds_needed:
         print(f"\n{'='*70}")
-        print(f"USING CACHED BASELINE: {BASELINE_MODEL}")
-        print("=" * 70)
-        print(f"  Run ID: {cached_baseline.run_id}")
-        print(f"  Parameters: {cached_baseline.parameters:,}")
-        print(f"  Eval Loss:  {cached_baseline.eval_loss:.4f}")
-        print(f"  Perplexity: {cached_baseline.perplexity:.2f}")
-        print(f"  Trained: {cached_baseline.created_at}")
-
-        baseline_ppl = cached_baseline.perplexity
-        baseline_run_id = cached_baseline.run_id
-        results[BASELINE_MODEL] = {
-            "success": True,
-            "model_name": cached_baseline.model_name,
-            "parameters": cached_baseline.parameters,
-            "eval_loss": cached_baseline.eval_loss,
-            "perplexity": cached_baseline.perplexity,
-            "final_train_loss": cached_baseline.final_train_loss,
-            "time_seconds": cached_baseline.time_seconds,
-            "is_baseline": True,
-            "cached": True,
-        }
-    else:
-        # Train baseline
-        print(f"\n{'='*70}")
-        print(f"Training BASELINE: {BASELINE_MODEL}")
+        print(f"Training {len(seeds_needed)} BASELINE runs on {BASELINE_GPU}")
         print("=" * 70)
 
         baseline_code = MODELS[BASELINE_MODEL]
-        with app.run():
-            baseline_result = train_model.remote(baseline_code, BASELINE_MODEL, CONFIG)
+        for seed in seeds_needed:
+            print(f"\n--- Baseline seed={seed} ---")
+            baseline_config = CONFIG.copy()
+            baseline_config["seed"] = seed
 
-        baseline_result["is_baseline"] = True
-        results[BASELINE_MODEL] = baseline_result
+            with app.run():
+                baseline_result = train_model.remote(baseline_code, BASELINE_MODEL, baseline_config)
 
-        if baseline_result["success"]:
-            print(f"\nBASELINE Results ({BASELINE_MODEL}):")
-            print(f"  Parameters: {baseline_result['parameters']:,}")
-            print(f"  Train Loss: {baseline_result['final_train_loss']:.4f}")
-            print(f"  Eval Loss:  {baseline_result['eval_loss']:.4f}")
-            print(f"  Perplexity: {baseline_result['perplexity']:.2f}")
-            print(f"  Time: {baseline_result['time_seconds']:.1f}s")
-            baseline_ppl = baseline_result["perplexity"]
+            baseline_result["is_baseline"] = True
 
-            # Save baseline to DB
-            baseline_run_id = save_result_to_db(db, baseline_result, CONFIG)
-            print(f"  Saved to DB: {baseline_run_id}")
-        else:
-            print(f"\nBASELINE FAILED: {baseline_result['error']}")
+            if baseline_result["success"]:
+                print(f"  Perplexity: {baseline_result['perplexity']:.2f}")
+                print(f"  Time: {baseline_result['time_seconds']:.1f}s")
 
-    # Train other models
+                # Save to DB
+                run_id = save_result_to_db(db, baseline_result, baseline_config)
+                print(f"  Saved to DB: {run_id}")
+            else:
+                print(f"  FAILED: {baseline_result['error']}")
+
+        # Refresh baseline stats
+        baseline_stats = db.get_baseline_stats(BASELINE_MODEL, cfg_hash)
+
+    # Use mean perplexity for comparison
+    baseline_ppl = baseline_stats['mean_ppl'] if baseline_stats['n_runs'] > 0 else None
+    baseline_std = baseline_stats['std_ppl'] if baseline_stats['n_runs'] > 0 else 0
+
+    if baseline_ppl:
+        print(f"\n{'='*70}")
+        print(f"USING CACHED BASELINE: {BASELINE_MODEL}")
+        print("=" * 70)
+        print(f"  N runs: {baseline_stats['n_runs']}")
+        print(f"  Mean perplexity: {baseline_ppl:.2f} ± {baseline_std:.2f}")
+        individual_ppls = [f"{r['perplexity']:.2f}" for r in baseline_stats['runs']]
+        print(f"  Individual: {individual_ppls}")
+
+        # Add baseline to results (using mean values)
+        results[BASELINE_MODEL] = {
+            "success": True,
+            "model_name": BASELINE_MODEL,
+            "parameters": baseline_stats['runs'][0]['parameters'] if baseline_stats['runs'] else 0,
+            "eval_loss": baseline_stats['mean_loss'],
+            "perplexity": baseline_ppl,
+            "perplexity_std": baseline_std,
+            "n_runs": baseline_stats['n_runs'],
+            "is_baseline": True,
+            "cached": True,
+        }
+
+    # Train other models on A10G
     for name, code in MODELS.items():
         if name == BASELINE_MODEL:
             continue  # Already handled
 
         print(f"\n{'='*70}")
-        print(f"Training: {name}")
+        print(f"Training: {name} on {CONFIG['gpu']}")
         print("=" * 70)
 
         with app.run():
@@ -588,17 +941,20 @@ def main():
             print(f"  Perplexity: {result['perplexity']:.2f}")
             print(f"  Time: {result['time_seconds']:.1f}s")
 
-            # Compare to baseline
+            # Compare to baseline mean
             if baseline_ppl is not None:
                 delta = result["perplexity"] - baseline_ppl
                 pct = (delta / baseline_ppl) * 100
+                # Check if outside 1 std dev
+                significant = abs(delta) > baseline_std if baseline_std > 0 else True
+                marker = " *" if significant else ""
                 if delta < 0:
-                    print(f"  vs Baseline: {delta:.2f} ({pct:+.1f}%) BETTER")
+                    print(f"  vs Baseline: {delta:.2f} ({pct:+.1f}%) BETTER{marker}")
                 else:
-                    print(f"  vs Baseline: +{delta:.2f} ({pct:+.1f}%) worse")
+                    print(f"  vs Baseline: +{delta:.2f} ({pct:+.1f}%) worse{marker}")
 
-            # Save to DB
-            run_id = save_result_to_db(db, result, CONFIG, baseline_run_id)
+            # Save to DB (no baseline_run_id since we use stats now)
+            run_id = save_result_to_db(db, result, CONFIG)
             print(f"  Saved to DB: {run_id}")
         else:
             print(f"\nFAILED: {result['error']}")
@@ -607,28 +963,44 @@ def main():
     print("\n" + "=" * 70)
     print("FAIR COMPARISON RESULTS")
     print("=" * 70)
+    if baseline_ppl:
+        print(f"Baseline: {BASELINE_MODEL} mean={baseline_ppl:.2f} ± {baseline_std:.2f} (n={baseline_stats['n_runs']})")
+    else:
+        print(f"Baseline: {BASELINE_MODEL} - NO BASELINE DATA")
+    print()
     print(f"{'Model':<20} {'Params':>12} {'Eval Loss':>12} {'Perplexity':>12} {'vs Baseline':>14}")
     print("-" * 70)
 
     sorted_results = sorted(
-        [(k, v) for k, v in results.items() if v["success"]],
-        key=lambda x: x[1]["eval_loss"]
+        [(k, v) for k, v in results.items() if v.get("success")],
+        key=lambda x: x[1].get("eval_loss", float("inf"))
     )
 
     for name, r in sorted_results:
-        if baseline_ppl and r["success"]:
-            delta = r["perplexity"] - baseline_ppl
+        if baseline_ppl and r.get("success"):
+            ppl = r.get("perplexity", 0)
+            delta = ppl - baseline_ppl
             pct = (delta / baseline_ppl) * 100
-            vs_baseline = f"{pct:+.1f}%" if name != BASELINE_MODEL else "(baseline)"
+            if name == BASELINE_MODEL:
+                vs_baseline = f"(baseline, n={r.get('n_runs', 1)})"
+            else:
+                vs_baseline = f"{pct:+.1f}%"
         else:
             vs_baseline = "N/A"
-        print(f"{name:<20} {r['parameters']:>12,} {r['eval_loss']:>12.4f} {r['perplexity']:>12.2f} {vs_baseline:>14}")
+        params = r.get("parameters", 0)
+        eval_loss = r.get("eval_loss", 0)
+        ppl = r.get("perplexity", 0)
+        print(f"{name:<20} {params:>12,} {eval_loss:>12.4f} {ppl:>12.2f} {vs_baseline:>14}")
 
     # Save with metadata
     output = {
         "config": CONFIG,
         "baseline_model": BASELINE_MODEL,
-        "baseline_run_id": baseline_run_id,
+        "baseline_stats": {
+            "mean_ppl": baseline_ppl,
+            "std_ppl": baseline_std,
+            "n_runs": baseline_stats['n_runs'],
+        },
         "results": results,
     }
     Path("experiments").mkdir(exist_ok=True)

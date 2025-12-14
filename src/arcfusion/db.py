@@ -212,6 +212,7 @@ class TrainingRun:
     batch_size: int = 32
     learning_rate: float = 1e-4
     max_steps: int = 5000
+    seed: int = 42  # Random seed for reproducibility
     # Hardware
     gpu_type: str = "A10G"
     mixed_precision: bool = True
@@ -236,7 +237,7 @@ class TrainingRun:
 
     def __post_init__(self) -> None:
         if not self.run_id:
-            content = f"{self.model_name}{self.d_model}{self.n_layers}{self.max_steps}{self.gpu_type}{self.created_at}"
+            content = f"{self.model_name}{self.d_model}{self.n_layers}{self.max_steps}{self.gpu_type}{self.seed}{self.created_at}"
             self.run_id = hashlib.sha256(content.encode()).hexdigest()[:12]
 
 
@@ -409,6 +410,7 @@ class ArcFusionDB:
                 batch_size INTEGER NOT NULL,
                 learning_rate REAL NOT NULL,
                 max_steps INTEGER NOT NULL,
+                seed INTEGER DEFAULT 42,
                 -- Hardware
                 gpu_type TEXT NOT NULL,
                 mixed_precision INTEGER DEFAULT 1,
@@ -1212,14 +1214,14 @@ class ArcFusionDB:
         self.conn.execute("""
             INSERT OR REPLACE INTO training_runs
             (run_id, model_name, d_model, n_layers, n_heads, vocab_size, batch_size,
-             learning_rate, max_steps, gpu_type, mixed_precision, parameters,
+             learning_rate, max_steps, seed, gpu_type, mixed_precision, parameters,
              final_train_loss, eval_loss, perplexity, time_seconds, success, error,
              is_baseline, baseline_run_id, vs_baseline_pct, recipe_id, engine_id, notes)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             run.run_id, run.model_name, run.d_model, run.n_layers, run.n_heads,
             run.vocab_size, run.batch_size, run.learning_rate, run.max_steps,
-            run.gpu_type, 1 if run.mixed_precision else 0, run.parameters,
+            run.seed, run.gpu_type, 1 if run.mixed_precision else 0, run.parameters,
             run.final_train_loss, run.eval_loss, run.perplexity, run.time_seconds,
             1 if run.success else 0, run.error, 1 if run.is_baseline else 0,
             run.baseline_run_id or None, run.vs_baseline_pct,
@@ -1247,6 +1249,7 @@ class ArcFusionDB:
             batch_size=row['batch_size'],
             learning_rate=row['learning_rate'],
             max_steps=row['max_steps'],
+            seed=row['seed'] if 'seed' in row.keys() else 42,
             gpu_type=row['gpu_type'],
             mixed_precision=bool(row['mixed_precision']),
             parameters=row['parameters'],
@@ -1317,6 +1320,78 @@ class ArcFusionDB:
         if baseline is None or baseline.perplexity == 0:
             return 0.0
         return ((run.perplexity - baseline.perplexity) / baseline.perplexity) * 100
+
+    def get_baseline_stats(self, model_name: str = "Transformer_MHA", config_hash: str = "") -> dict:
+        """
+        Get statistics for baseline runs (mean, std, count).
+
+        Args:
+            model_name: The baseline model name (default: Transformer_MHA)
+            config_hash: Optional config hash to match specific hyperparameters
+
+        Returns:
+            Dict with: mean_ppl, std_ppl, n_runs, runs (list of TrainingRun)
+        """
+        import math
+
+        query = """
+            SELECT * FROM training_runs
+            WHERE model_name = ? AND is_baseline = 1 AND success = 1
+        """
+        params = [model_name]
+
+        if config_hash:
+            query += " AND notes LIKE ?"
+            params.append(f"%config_hash={config_hash}%")
+
+        query += " ORDER BY created_at DESC"
+        rows = self.conn.execute(query, params).fetchall()
+
+        runs = [self._row_to_training_run(r) for r in rows]
+
+        if not runs:
+            return {"mean_ppl": 0.0, "std_ppl": 0.0, "n_runs": 0, "runs": []}
+
+        perplexities = [r.perplexity for r in runs]
+        mean_ppl = sum(perplexities) / len(perplexities)
+
+        if len(perplexities) > 1:
+            variance = sum((p - mean_ppl) ** 2 for p in perplexities) / (len(perplexities) - 1)
+            std_ppl = math.sqrt(variance)
+        else:
+            std_ppl = 0.0
+
+        return {
+            "mean_ppl": mean_ppl,
+            "std_ppl": std_ppl,
+            "n_runs": len(runs),
+            "runs": runs,
+        }
+
+    def get_baseline_seeds_needed(self, target_runs: int = 3, model_name: str = "Transformer_MHA", config_hash: str = "") -> list[int]:
+        """
+        Get list of seeds that still need to be run for baseline.
+
+        Args:
+            target_runs: How many baseline runs we want (default: 3)
+            model_name: The baseline model name
+            config_hash: Config hash to match
+
+        Returns:
+            List of seeds that haven't been run yet
+        """
+        stats = self.get_baseline_stats(model_name, config_hash)
+        existing_seeds = {r.seed for r in stats["runs"]}
+
+        # Standard seeds to use for baselines
+        all_seeds = [42, 123, 456, 789, 1337]
+
+        needed = []
+        for seed in all_seeds:
+            if seed not in existing_seeds and len(needed) + stats["n_runs"] < target_runs:
+                needed.append(seed)
+
+        return needed
 
     # -------------------------------------------------------------------------
     # Component compatibility operations (aggregate scores)
