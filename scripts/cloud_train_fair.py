@@ -19,21 +19,23 @@ app = modal.App("arcfusion-fair-compare")
 
 image = (
     modal.Image.debian_slim(python_version="3.11")
-    .pip_install("torch>=2.0", "numpy")
+    .pip_install("torch>=2.0", "numpy", "datasets", "tiktoken")
 )
 
 # Training configuration
 CONFIG = {
     "d_model": 256,
-    "vocab_size": 8000,
+    "vocab_size": 50257,  # GPT-2 tokenizer vocab size
     "n_layers": 4,
     "n_heads": 8,
+    "seq_len": 128,
     "batch_size": 32,
-    "learning_rate": 1e-4,
-    "max_steps": 5000,
-    "eval_interval": 100,
+    "learning_rate": 3e-4,
+    "max_steps": 2000,  # Fewer steps but on real data
+    "eval_interval": 200,
     "mixed_precision": True,  # Use FP16 autocast + GradScaler
     "gpu": "A10G",  # A10G has better FP16 perf than T4
+    "dataset": "wikitext-2",  # Real text data
 }
 
 # Baseline model - always trained first for comparison
@@ -42,11 +44,14 @@ BASELINE_MODEL = "Transformer_MHA"
 
 @app.function(image=image, gpu="A10G", timeout=600)
 def train_model(code: str, model_name: str, config: dict) -> dict:
-    """Train a model on GPU with mixed precision and proper evaluation."""
+    """Train a model on WikiText-2 with mixed precision."""
     import time
     import math
     import torch
     import torch.nn as nn
+    from torch.utils.data import DataLoader, Dataset
+    from datasets import load_dataset
+    import tiktoken
 
     use_amp = config.get("mixed_precision", True)
 
@@ -62,11 +67,53 @@ def train_model(code: str, model_name: str, config: dict) -> dict:
         "error": None,
         "gpu": config.get("gpu", "A10G"),
         "mixed_precision": use_amp,
+        "dataset": config.get("dataset", "wikitext-2"),
     }
 
     start = time.time()
 
     try:
+        # Load and tokenize WikiText-2
+        print("Loading WikiText-2 dataset...")
+        ds = load_dataset("wikitext", "wikitext-2-raw-v1")
+        enc = tiktoken.get_encoding("gpt2")
+
+        # Tokenize all splits
+        def tokenize_split(split_name):
+            texts = [t for t in ds[split_name]['text'] if t.strip()]
+            all_tokens = []
+            for text in texts:
+                all_tokens.extend(enc.encode(text))
+            return all_tokens
+
+        train_tokens = tokenize_split('train')
+        val_tokens = tokenize_split('validation')
+        test_tokens = tokenize_split('test')
+        print(f"Tokens: train={len(train_tokens):,}, val={len(val_tokens):,}, test={len(test_tokens):,}")
+
+        # Create dataset class
+        class TokenDataset(Dataset):
+            def __init__(self, tokens, seq_len):
+                self.tokens = torch.tensor(tokens, dtype=torch.long)
+                self.seq_len = seq_len
+
+            def __len__(self):
+                return max(0, len(self.tokens) - self.seq_len - 1)
+
+            def __getitem__(self, idx):
+                chunk = self.tokens[idx:idx + self.seq_len + 1]
+                return chunk[:-1], chunk[1:]
+
+        seq_len = config["seq_len"]
+        batch_size = config["batch_size"]
+        train_ds = TokenDataset(train_tokens, seq_len)
+        val_ds = TokenDataset(val_tokens, seq_len)
+        test_ds = TokenDataset(test_tokens, seq_len)
+
+        train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, drop_last=True)
+        val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, drop_last=True)
+        test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, drop_last=True)
+
         # Execute model code
         ns = {}
         exec(code, ns)
@@ -93,50 +140,64 @@ def train_model(code: str, model_name: str, config: dict) -> dict:
         optimizer = torch.optim.AdamW(model.parameters(), lr=config["learning_rate"])
         criterion = nn.CrossEntropyLoss()
         scaler = torch.amp.GradScaler('cuda', enabled=use_amp)
-
         vocab_size = config["vocab_size"]
-        batch_size = config["batch_size"]
-        seq_len = 64
 
-        # Training loop with mixed precision
+        def evaluate(loader, max_batches=50):
+            model.eval()
+            total_loss, total_tokens = 0, 0
+            with torch.no_grad():
+                for i, (x, y) in enumerate(loader):
+                    if i >= max_batches:
+                        break
+                    x, y = x.to(device), y.to(device)
+                    with torch.amp.autocast('cuda', enabled=use_amp):
+                        logits = model(x)
+                        loss = criterion(logits.reshape(-1, vocab_size), y.reshape(-1))
+                    total_loss += loss.item() * y.numel()
+                    total_tokens += y.numel()
+            return total_loss / total_tokens if total_tokens > 0 else float('inf')
+
+        # Training loop
+        print(f"Training for {config['max_steps']} steps...")
+        step = 0
+        train_iter = iter(train_loader)
         model.train()
-        for step in range(config["max_steps"]):
-            # Random batch
-            x = torch.randint(0, vocab_size, (batch_size, seq_len + 1), device=device)
-            inputs, targets = x[:, :-1], x[:, 1:]
 
+        while step < config["max_steps"]:
+            try:
+                x, y = next(train_iter)
+            except StopIteration:
+                train_iter = iter(train_loader)
+                x, y = next(train_iter)
+
+            x, y = x.to(device), y.to(device)
             optimizer.zero_grad()
+
             with torch.amp.autocast('cuda', enabled=use_amp):
-                logits = model(inputs)
-                loss = criterion(logits.reshape(-1, vocab_size), targets.reshape(-1))
+                logits = model(x)
+                loss = criterion(logits.reshape(-1, vocab_size), y.reshape(-1))
 
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             scaler.step(optimizer)
             scaler.update()
+            step += 1
 
             if step % config["eval_interval"] == 0:
-                print(f"Step {step}: loss={loss.item():.4f}")
+                val_loss = evaluate(val_loader)
+                val_ppl = math.exp(min(val_loss, 20))
+                print(f"Step {step}: train_loss={loss.item():.4f}, val_ppl={val_ppl:.2f}")
+                model.train()
 
-            result["steps"] = step + 1
+            result["steps"] = step
             result["final_train_loss"] = loss.item()
 
-        # Evaluation (10 batches) with mixed precision
-        model.eval()
-        eval_losses = []
-        with torch.no_grad():
-            for _ in range(10):
-                x = torch.randint(0, vocab_size, (batch_size, seq_len + 1), device=device)
-                inputs, targets = x[:, :-1], x[:, 1:]
-                with torch.amp.autocast('cuda', enabled=use_amp):
-                    logits = model(inputs)
-                    loss = criterion(logits.reshape(-1, vocab_size), targets.reshape(-1))
-                eval_losses.append(loss.item())
-
-        result["eval_loss"] = sum(eval_losses) / len(eval_losses)
+        # Final evaluation on test set
+        result["eval_loss"] = evaluate(test_loader, max_batches=100)
         result["perplexity"] = math.exp(min(result["eval_loss"], 20))
         result["success"] = True
+        print(f"Final test perplexity: {result['perplexity']:.2f}")
 
     except Exception as e:
         import traceback
@@ -157,7 +218,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class MHA(nn.Module):
-    """Standard Multi-Head Attention"""
+    """Standard Multi-Head Attention with causal masking"""
     def __init__(self, d_model, n_heads, dropout=0.1):
         super().__init__()
         self.n_heads = n_heads
@@ -172,6 +233,9 @@ class MHA(nn.Module):
         qkv = self.qkv(x).reshape(B, N, 3, self.n_heads, self.head_dim).permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]
         attn = (q @ k.transpose(-2, -1)) * self.scale
+        # Causal mask: prevent attending to future tokens
+        mask = torch.triu(torch.ones(N, N, device=x.device), diagonal=1).bool()
+        attn = attn.masked_fill(mask, float('-inf'))
         attn = F.softmax(attn, dim=-1)
         attn = self.dropout(attn)
         x = (attn @ v).transpose(1, 2).reshape(B, N, C)
@@ -219,7 +283,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class GQA(nn.Module):
-    """Grouped Query Attention - fewer KV heads than Q heads"""
+    """Grouped Query Attention with causal masking - fewer KV heads than Q heads"""
     def __init__(self, d_model, n_heads, n_kv_heads=2, dropout=0.1):
         super().__init__()
         self.n_heads = n_heads
@@ -234,19 +298,22 @@ class GQA(nn.Module):
 
     def forward(self, x):
         B, N, C = x.shape
-        q = self.q_proj(x).reshape(B, N, self.n_heads, self.head_dim).transpose(1, 2)
-        k = self.k_proj(x).reshape(B, N, self.n_kv_heads, self.head_dim).transpose(1, 2)
-        v = self.v_proj(x).reshape(B, N, self.n_kv_heads, self.head_dim).transpose(1, 2)
+        q = self.q_proj(x).reshape(B, N, self.n_heads, self.head_dim).transpose(1, 2).contiguous()
+        k = self.k_proj(x).reshape(B, N, self.n_kv_heads, self.head_dim).transpose(1, 2).contiguous()
+        v = self.v_proj(x).reshape(B, N, self.n_kv_heads, self.head_dim).transpose(1, 2).contiguous()
 
         # Repeat KV heads to match Q heads
         n_rep = self.n_heads // self.n_kv_heads
-        k = k.repeat_interleave(n_rep, dim=1)
-        v = v.repeat_interleave(n_rep, dim=1)
+        k = k.repeat_interleave(n_rep, dim=1).contiguous()
+        v = v.repeat_interleave(n_rep, dim=1).contiguous()
 
         attn = (q @ k.transpose(-2, -1)) * self.scale
+        # Causal mask: prevent attending to future tokens
+        mask = torch.triu(torch.ones(N, N, device=x.device), diagonal=1).bool()
+        attn = attn.masked_fill(mask, float('-inf'))
         attn = F.softmax(attn, dim=-1)
         attn = self.dropout(attn)
-        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
+        x = (attn @ v).transpose(1, 2).contiguous().reshape(B, N, C)
         return self.out(x)
 
 class Block(nn.Module):
@@ -291,7 +358,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class MQA(nn.Module):
-    """Multi-Query Attention - single KV head shared by all Q heads"""
+    """Multi-Query Attention with causal masking - single KV head shared by all Q heads"""
     def __init__(self, d_model, n_heads, dropout=0.1):
         super().__init__()
         self.n_heads = n_heads
@@ -305,18 +372,21 @@ class MQA(nn.Module):
 
     def forward(self, x):
         B, N, C = x.shape
-        q = self.q_proj(x).reshape(B, N, self.n_heads, self.head_dim).transpose(1, 2)
-        k = self.k_proj(x).reshape(B, N, 1, self.head_dim).transpose(1, 2)
-        v = self.v_proj(x).reshape(B, N, 1, self.head_dim).transpose(1, 2)
+        q = self.q_proj(x).reshape(B, N, self.n_heads, self.head_dim).transpose(1, 2).contiguous()
+        k = self.k_proj(x).reshape(B, N, 1, self.head_dim).transpose(1, 2).contiguous()
+        v = self.v_proj(x).reshape(B, N, 1, self.head_dim).transpose(1, 2).contiguous()
 
-        # Broadcast K,V to all heads
-        k = k.expand(-1, self.n_heads, -1, -1)
-        v = v.expand(-1, self.n_heads, -1, -1)
+        # Repeat K,V for all heads (use repeat for proper gradient flow)
+        k = k.repeat(1, self.n_heads, 1, 1)
+        v = v.repeat(1, self.n_heads, 1, 1)
 
         attn = (q @ k.transpose(-2, -1)) * self.scale
+        # Causal mask: prevent attending to future tokens
+        mask = torch.triu(torch.ones(N, N, device=x.device), diagonal=1).bool()
+        attn = attn.masked_fill(mask, float('-inf'))
         attn = F.softmax(attn, dim=-1)
         attn = self.dropout(attn)
-        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
+        x = (attn @ v).transpose(1, 2).contiguous().reshape(B, N, C)
         return self.out(x)
 
 class Block(nn.Module):
