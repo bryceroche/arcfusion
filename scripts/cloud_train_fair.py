@@ -40,14 +40,14 @@ CONFIG = {
     "max_steps": 2000,  # Fewer steps but on real data
     "eval_interval": 200,
     "mixed_precision": True,  # Use FP16 autocast + GradScaler
-    "gpu": "T4",  # Default GPU for experiments
+    "gpu": "A100",  # Default GPU for experiments
     "dataset": "wikitext-2",  # Real text data
     "seed": 42,  # Default seed (overridden for baselines)
 }
 
 # Baseline configuration
 BASELINE_MODEL = "Transformer_MHA"
-BASELINE_GPU = "T4"  # Use T4 for baseline (same as experiments for consistency)
+BASELINE_GPU = "A100"  # Use A100 for speed
 BASELINE_TARGET_RUNS = 3  # How many baseline runs to average
 BASELINE_SEEDS = [42, 123, 456]  # Seeds for baseline runs
 
@@ -223,9 +223,9 @@ def _train_model_impl(code: str, model_name: str, config: dict, gpu_type: str) -
     return result
 
 
-@app.function(image=image, gpu="T4", timeout=1800)
+@app.function(image=image, gpu="A100", timeout=1800)
 def train_model(code: str, model_name: str, config: dict) -> dict:
-    """Train model on A10G GPU (default for experiments)."""
+    """Train model on A100 GPU (fast experiments)."""
     import time
     import math
     import torch
@@ -234,7 +234,7 @@ def train_model(code: str, model_name: str, config: dict) -> dict:
     from datasets import load_dataset
     import tiktoken
 
-    gpu_type = "A10G"
+    gpu_type = "A100"
     use_amp = config.get("mixed_precision", True)
     seed = config.get("seed", 42)
 
@@ -705,7 +705,7 @@ def main():
     if baseline_stats['n_runs'] > 0:
         print(f"  Mean perplexity: {baseline_stats['mean_ppl']:.2f}")
         print(f"  Std deviation:   {baseline_stats['std_ppl']:.2f}")
-        print(f"  Seeds run: {[r['seed'] for r in baseline_stats['runs']]}")
+        print(f"  Seeds run: {[r.seed for r in baseline_stats['runs']]}")
     if seeds_needed:
         print(f"  Seeds needed: {seeds_needed}")
 
@@ -753,11 +753,12 @@ def main():
         print(f"  Individual: {individual_ppls}")
 
         # Add baseline to results (using mean values)
+        import math
         results[BASELINE_MODEL] = {
             "success": True,
             "model_name": BASELINE_MODEL,
             "parameters": baseline_stats['runs'][0].parameters if baseline_stats['runs'] else 0,
-            "eval_loss": baseline_stats['mean_loss'],
+            "eval_loss": math.log(baseline_ppl) if baseline_ppl > 0 else 0,
             "perplexity": baseline_ppl,
             "perplexity_std": baseline_std,
             "n_runs": baseline_stats['n_runs'],
