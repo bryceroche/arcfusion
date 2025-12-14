@@ -607,6 +607,149 @@ class Transformer_MQA(nn.Module):
             x = block(x)
         return self.head(self.ln_f(x))
 ''',
+
+    # Mamba-style Selective State Space Model
+    "Transformer_Mamba": '''
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class SelectiveSSM(nn.Module):
+    """Simplified Selective State Space Model (Mamba-style).
+
+    Key ideas from Mamba paper:
+    - Input-dependent (selective) state transitions
+    - Linear time complexity O(n) vs O(n^2) for attention
+    - Parallel scan for efficient training
+    """
+    def __init__(self, d_model, d_state=16, d_conv=4, expand=2, dropout=0.1):
+        super().__init__()
+        self.d_model = d_model
+        self.d_state = d_state
+        self.d_conv = d_conv
+        self.expand = expand
+        self.d_inner = int(expand * d_model)
+
+        # Input projection
+        self.in_proj = nn.Linear(d_model, self.d_inner * 2, bias=False)
+
+        # Convolution for local context
+        self.conv1d = nn.Conv1d(
+            self.d_inner, self.d_inner,
+            kernel_size=d_conv,
+            padding=d_conv - 1,
+            groups=self.d_inner,
+            bias=True
+        )
+
+        # SSM parameters - input-dependent (selective)
+        self.x_proj = nn.Linear(self.d_inner, d_state * 2 + 1, bias=False)  # dt, B, C
+
+        # Learnable SSM parameters
+        self.dt_proj = nn.Linear(1, self.d_inner, bias=True)
+        self.A = nn.Parameter(torch.randn(self.d_inner, d_state))
+        self.D = nn.Parameter(torch.ones(self.d_inner))
+
+        # Output projection
+        self.out_proj = nn.Linear(self.d_inner, d_model, bias=False)
+        self.dropout = nn.Dropout(dropout)
+
+        # Initialize A with negative values for stability
+        with torch.no_grad():
+            self.A.copy_(-torch.exp(torch.linspace(0, 4, d_state)).unsqueeze(0).expand(self.d_inner, -1))
+
+    def forward(self, x):
+        B, L, D = x.shape
+
+        # Input projection: split into main and gate
+        xz = self.in_proj(x)
+        x_main, z = xz.chunk(2, dim=-1)
+
+        # Convolution for local context
+        x_conv = x_main.transpose(1, 2)  # B, d_inner, L
+        x_conv = self.conv1d(x_conv)[:, :, :L]  # Causal: trim to original length
+        x_conv = x_conv.transpose(1, 2)  # B, L, d_inner
+        x_conv = F.silu(x_conv)
+
+        # Input-dependent SSM parameters
+        x_ssm = self.x_proj(x_conv)  # B, L, d_state*2 + 1
+        dt, B_input, C = x_ssm[:, :, :1], x_ssm[:, :, 1:self.d_state+1], x_ssm[:, :, self.d_state+1:]
+
+        # Project dt to d_inner dimensions
+        dt = F.softplus(self.dt_proj(dt))  # B, L, d_inner
+
+        # Discretize: A_bar = exp(dt * A)
+        A = self.A  # d_inner, d_state
+
+        # Simplified parallel SSM computation (not full parallel scan, but efficient)
+        # This is a simplified version - full Mamba uses custom CUDA kernels
+        h = torch.zeros(B, self.d_inner, self.d_state, device=x.device, dtype=x.dtype)
+        outputs = []
+
+        for t in range(L):
+            dt_t = dt[:, t, :]  # B, d_inner
+            B_t = B_input[:, t, :]  # B, d_state
+            C_t = C[:, t, :]  # B, d_state
+            x_t = x_conv[:, t, :]  # B, d_inner
+
+            # State update: h = A_bar * h + B_bar * x
+            A_bar = torch.exp(dt_t.unsqueeze(-1) * A.unsqueeze(0))  # B, d_inner, d_state
+            B_bar = dt_t.unsqueeze(-1) * B_t.unsqueeze(1)  # B, d_inner, d_state
+            h = A_bar * h + B_bar * x_t.unsqueeze(-1)
+
+            # Output: y = C * h + D * x
+            y_t = (h * C_t.unsqueeze(1)).sum(-1) + self.D * x_t  # B, d_inner
+            outputs.append(y_t)
+
+        y = torch.stack(outputs, dim=1)  # B, L, d_inner
+
+        # Gate and output
+        y = y * F.silu(z)
+        y = self.out_proj(y)
+        return self.dropout(y)
+
+
+class MambaBlock(nn.Module):
+    def __init__(self, d_model, d_state=16):
+        super().__init__()
+        self.ln1 = nn.LayerNorm(d_model)
+        self.ssm = SelectiveSSM(d_model, d_state=d_state)
+        self.ln2 = nn.LayerNorm(d_model)
+        self.ffn = nn.Sequential(
+            nn.Linear(d_model, d_model * 4),
+            nn.GELU(),
+            nn.Linear(d_model * 4, d_model),
+            nn.Dropout(0.1),
+        )
+
+    def forward(self, x):
+        x = x + self.ssm(self.ln1(x))
+        x = x + self.ffn(self.ln2(x))
+        return x
+
+
+class Transformer_Mamba(nn.Module):
+    """Mamba-style language model using Selective SSM instead of attention.
+
+    Note: n_heads is ignored (kept for API compatibility).
+    Uses d_state = d_model // 16 for state dimension.
+    """
+    def __init__(self, d_model=256, vocab_size=8000, n_layers=4, n_heads=8):
+        super().__init__()
+        d_state = max(16, d_model // 16)  # Scale state dim with model
+        self.embed = nn.Embedding(vocab_size, d_model)
+        # No positional embedding - SSM captures position implicitly
+        self.blocks = nn.ModuleList([MambaBlock(d_model, d_state) for _ in range(n_layers)])
+        self.ln_f = nn.LayerNorm(d_model)
+        self.head = nn.Linear(d_model, vocab_size)
+
+    def forward(self, x):
+        B, T = x.shape
+        x = self.embed(x)  # No positional encoding needed
+        for block in self.blocks:
+            x = block(x)
+        return self.head(self.ln_f(x))
+''',
 }
 
 
