@@ -26,6 +26,10 @@ app = modal.App("arcfusion-fair-compare")
 image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install("torch>=2.0", "numpy", "datasets", "tiktoken")
+    # Pre-cache WikiText-2 during image build to avoid runtime download timeouts
+    .run_commands(
+        'python -c "from datasets import load_dataset; load_dataset(\'wikitext\', \'wikitext-2-raw-v1\', trust_remote_code=True)"'
+    )
 )
 
 # Training configuration
