@@ -8,12 +8,19 @@ Run with: .venv-modal/bin/python scripts/cloud_train_fair.py
 Features:
 - Mixed precision (FP16) for ~2x speedup on tensor cores
 - A10G GPU (faster than T4, good FP16 performance)
-- Always trains vanilla Transformer_MHA as baseline first
+- Baseline caching: trains vanilla Transformer once, reuses result
+- Results saved to arcfusion.db training_runs table
 """
 
 import modal
 import json
+import sys
 from pathlib import Path
+from datetime import datetime
+
+# Add src to path for DB access (import db directly to avoid other deps)
+sys.path.insert(0, str(Path(__file__).parent.parent / "src" / "arcfusion"))
+from db import ArcFusionDB, TrainingRun
 
 app = modal.App("arcfusion-fair-compare")
 
@@ -426,6 +433,68 @@ class Transformer_MQA(nn.Module):
 }
 
 
+def config_hash(config: dict) -> str:
+    """Generate a hash for config to match cached baselines."""
+    import hashlib
+    key_fields = ["d_model", "n_layers", "n_heads", "vocab_size", "seq_len", "max_steps"]
+    content = "-".join(str(config.get(k, "")) for k in key_fields)
+    return hashlib.sha256(content.encode()).hexdigest()[:8]
+
+
+def result_to_training_run(result: dict, config: dict, baseline_run_id: str = "") -> TrainingRun:
+    """Convert Modal result dict to TrainingRun dataclass."""
+    baseline_ppl = None
+    if baseline_run_id:
+        # Will calculate vs_baseline_pct later
+        pass
+
+    return TrainingRun(
+        model_name=result["model_name"],
+        d_model=config["d_model"],
+        n_layers=config["n_layers"],
+        n_heads=config["n_heads"],
+        vocab_size=config["vocab_size"],
+        batch_size=config["batch_size"],
+        learning_rate=config["learning_rate"],
+        max_steps=config["max_steps"],
+        gpu_type=result.get("gpu", config.get("gpu", "A10G")),
+        mixed_precision=result.get("mixed_precision", config.get("mixed_precision", True)),
+        parameters=result.get("parameters", 0),
+        final_train_loss=result.get("final_train_loss", 0.0),
+        eval_loss=result.get("eval_loss", 0.0),
+        perplexity=result.get("perplexity", 0.0),
+        time_seconds=result.get("time_seconds", 0.0),
+        success=result.get("success", False),
+        error=result.get("error", ""),
+        is_baseline=result.get("is_baseline", False),
+        baseline_run_id=baseline_run_id,
+        notes=f"config_hash={config_hash(config)}, dataset={config.get('dataset', 'wikitext-2')}",
+    )
+
+
+def get_cached_baseline(db: ArcFusionDB, config: dict) -> TrainingRun | None:
+    """Get cached baseline if config matches."""
+    cfg_hash = config_hash(config)
+    runs = db.list_training_runs(model_name=BASELINE_MODEL, baseline_only=True, success_only=True, limit=10)
+    for run in runs:
+        if f"config_hash={cfg_hash}" in run.notes:
+            return run
+    return None
+
+
+def save_result_to_db(db: ArcFusionDB, result: dict, config: dict, baseline_run_id: str = "") -> str:
+    """Save training result to database."""
+    run = result_to_training_run(result, config, baseline_run_id)
+
+    # Calculate vs_baseline_pct if we have a baseline
+    if baseline_run_id:
+        baseline = db.get_training_run(baseline_run_id)
+        if baseline and baseline.perplexity > 0:
+            run.vs_baseline_pct = ((run.perplexity - baseline.perplexity) / baseline.perplexity) * 100
+
+    return db.add_training_run(run)
+
+
 def main():
     print("=" * 70)
     print("FAIR COMPARISON - Same structure, different attention mechanisms")
@@ -434,36 +503,72 @@ def main():
     print(f"GPU: {CONFIG['gpu']}, Mixed Precision: {CONFIG['mixed_precision']}")
     print()
 
+    # Open DB connection
+    db = ArcFusionDB("arcfusion.db")
+    print(f"Database: arcfusion.db (training_runs: {db.stats().get('training_runs', 0)} existing)")
+
     results = {}
+    baseline_run_id = ""
+    baseline_ppl = None
 
-    # Always train baseline first
-    print(f"\n{'='*70}")
-    print(f"Training BASELINE: {BASELINE_MODEL}")
-    print("=" * 70)
+    # Check for cached baseline
+    cached_baseline = get_cached_baseline(db, CONFIG)
 
-    baseline_code = MODELS[BASELINE_MODEL]
-    with app.run():
-        baseline_result = train_model.remote(baseline_code, BASELINE_MODEL, CONFIG)
+    if cached_baseline:
+        print(f"\n{'='*70}")
+        print(f"USING CACHED BASELINE: {BASELINE_MODEL}")
+        print("=" * 70)
+        print(f"  Run ID: {cached_baseline.run_id}")
+        print(f"  Parameters: {cached_baseline.parameters:,}")
+        print(f"  Eval Loss:  {cached_baseline.eval_loss:.4f}")
+        print(f"  Perplexity: {cached_baseline.perplexity:.2f}")
+        print(f"  Trained: {cached_baseline.created_at}")
 
-    results[BASELINE_MODEL] = baseline_result
-    baseline_result["is_baseline"] = True
-
-    if baseline_result["success"]:
-        print(f"\nBASELINE Results ({BASELINE_MODEL}):")
-        print(f"  Parameters: {baseline_result['parameters']:,}")
-        print(f"  Train Loss: {baseline_result['final_train_loss']:.4f}")
-        print(f"  Eval Loss:  {baseline_result['eval_loss']:.4f}")
-        print(f"  Perplexity: {baseline_result['perplexity']:.2f}")
-        print(f"  Time: {baseline_result['time_seconds']:.1f}s")
-        baseline_ppl = baseline_result["perplexity"]
+        baseline_ppl = cached_baseline.perplexity
+        baseline_run_id = cached_baseline.run_id
+        results[BASELINE_MODEL] = {
+            "success": True,
+            "model_name": cached_baseline.model_name,
+            "parameters": cached_baseline.parameters,
+            "eval_loss": cached_baseline.eval_loss,
+            "perplexity": cached_baseline.perplexity,
+            "final_train_loss": cached_baseline.final_train_loss,
+            "time_seconds": cached_baseline.time_seconds,
+            "is_baseline": True,
+            "cached": True,
+        }
     else:
-        print(f"\nBASELINE FAILED: {baseline_result['error']}")
-        baseline_ppl = None
+        # Train baseline
+        print(f"\n{'='*70}")
+        print(f"Training BASELINE: {BASELINE_MODEL}")
+        print("=" * 70)
+
+        baseline_code = MODELS[BASELINE_MODEL]
+        with app.run():
+            baseline_result = train_model.remote(baseline_code, BASELINE_MODEL, CONFIG)
+
+        baseline_result["is_baseline"] = True
+        results[BASELINE_MODEL] = baseline_result
+
+        if baseline_result["success"]:
+            print(f"\nBASELINE Results ({BASELINE_MODEL}):")
+            print(f"  Parameters: {baseline_result['parameters']:,}")
+            print(f"  Train Loss: {baseline_result['final_train_loss']:.4f}")
+            print(f"  Eval Loss:  {baseline_result['eval_loss']:.4f}")
+            print(f"  Perplexity: {baseline_result['perplexity']:.2f}")
+            print(f"  Time: {baseline_result['time_seconds']:.1f}s")
+            baseline_ppl = baseline_result["perplexity"]
+
+            # Save baseline to DB
+            baseline_run_id = save_result_to_db(db, baseline_result, CONFIG)
+            print(f"  Saved to DB: {baseline_run_id}")
+        else:
+            print(f"\nBASELINE FAILED: {baseline_result['error']}")
 
     # Train other models
     for name, code in MODELS.items():
         if name == BASELINE_MODEL:
-            continue  # Already trained
+            continue  # Already handled
 
         print(f"\n{'='*70}")
         print(f"Training: {name}")
@@ -491,6 +596,10 @@ def main():
                     print(f"  vs Baseline: {delta:.2f} ({pct:+.1f}%) BETTER")
                 else:
                     print(f"  vs Baseline: +{delta:.2f} ({pct:+.1f}%) worse")
+
+            # Save to DB
+            run_id = save_result_to_db(db, result, CONFIG, baseline_run_id)
+            print(f"  Saved to DB: {run_id}")
         else:
             print(f"\nFAILED: {result['error']}")
 
@@ -519,12 +628,21 @@ def main():
     output = {
         "config": CONFIG,
         "baseline_model": BASELINE_MODEL,
+        "baseline_run_id": baseline_run_id,
         "results": results,
     }
     Path("experiments").mkdir(exist_ok=True)
     with open("experiments/fair_comparison_results.json", "w") as f:
         json.dump(output, f, indent=2)
     print(f"\nSaved to experiments/fair_comparison_results.json")
+
+    # DB summary
+    stats = db.stats()
+    print(f"\nDatabase updated:")
+    print(f"  Training runs: {stats.get('training_runs', 0)}")
+    print(f"  Successful: {stats.get('successful_runs', 0)}")
+    print(f"  Baselines: {stats.get('baseline_runs', 0)}")
+    db.close()
 
 
 if __name__ == "__main__":
