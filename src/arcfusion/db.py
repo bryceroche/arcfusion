@@ -195,6 +195,51 @@ class RecipeAdjustment:
             self.adjustment_id = hashlib.sha256(content.encode()).hexdigest()[:12]
 
 
+@dataclass
+class TrainingRun:
+    """
+    Records a complete training run with hardware, config, and results.
+
+    Used for tracking experiments and comparing architectures fairly.
+    Links to benchmark_results for post-training evaluation.
+    """
+    model_name: str
+    # Training configuration
+    d_model: int = 256
+    n_layers: int = 4
+    n_heads: int = 8
+    vocab_size: int = 8000
+    batch_size: int = 32
+    learning_rate: float = 1e-4
+    max_steps: int = 5000
+    # Hardware
+    gpu_type: str = "A10G"
+    mixed_precision: bool = True
+    # Results
+    parameters: int = 0
+    final_train_loss: float = 0.0
+    eval_loss: float = 0.0
+    perplexity: float = 0.0
+    time_seconds: float = 0.0
+    success: bool = False
+    error: str = ""
+    # Baseline comparison
+    is_baseline: bool = False
+    baseline_run_id: str = ""  # Links to the baseline run for comparison
+    vs_baseline_pct: float = 0.0  # % difference from baseline (negative = better)
+    # Metadata
+    recipe_id: str = ""  # Links to recipe if dreamed
+    engine_id: str = ""  # Links to engine if known architecture
+    notes: str = ""
+    run_id: str = ""
+    created_at: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.run_id:
+            content = f"{self.model_name}{self.d_model}{self.n_layers}{self.max_steps}{self.gpu_type}{self.created_at}"
+            self.run_id = hashlib.sha256(content.encode()).hexdigest()[:12]
+
+
 class ArcFusionDB:
     """SQLite database for ML architecture components and engines"""
 
@@ -352,6 +397,43 @@ class ArcFusionDB:
                 FOREIGN KEY (component_id) REFERENCES components(component_id)
             );
 
+            -- Training runs: detailed experiment tracking
+            CREATE TABLE IF NOT EXISTS training_runs (
+                run_id TEXT PRIMARY KEY,
+                model_name TEXT NOT NULL,
+                -- Training config
+                d_model INTEGER NOT NULL,
+                n_layers INTEGER NOT NULL,
+                n_heads INTEGER NOT NULL,
+                vocab_size INTEGER NOT NULL,
+                batch_size INTEGER NOT NULL,
+                learning_rate REAL NOT NULL,
+                max_steps INTEGER NOT NULL,
+                -- Hardware
+                gpu_type TEXT NOT NULL,
+                mixed_precision INTEGER DEFAULT 1,
+                -- Results
+                parameters INTEGER DEFAULT 0,
+                final_train_loss REAL DEFAULT 0.0,
+                eval_loss REAL DEFAULT 0.0,
+                perplexity REAL DEFAULT 0.0,
+                time_seconds REAL DEFAULT 0.0,
+                success INTEGER DEFAULT 0,
+                error TEXT,
+                -- Baseline comparison
+                is_baseline INTEGER DEFAULT 0,
+                baseline_run_id TEXT,
+                vs_baseline_pct REAL DEFAULT 0.0,
+                -- Links
+                recipe_id TEXT,
+                engine_id TEXT,
+                notes TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (recipe_id) REFERENCES recipes(recipe_id),
+                FOREIGN KEY (engine_id) REFERENCES engines(engine_id),
+                FOREIGN KEY (baseline_run_id) REFERENCES training_runs(run_id)
+            );
+
             -- Indexes
             CREATE INDEX IF NOT EXISTS idx_comp_usefulness ON components(usefulness_score DESC);
             CREATE INDEX IF NOT EXISTS idx_comp_complexity ON components(time_complexity);
@@ -371,6 +453,11 @@ class ArcFusionDB:
             CREATE INDEX IF NOT EXISTS idx_recipe_score ON recipes(estimated_score DESC);
             CREATE INDEX IF NOT EXISTS idx_adjustment_recipe ON recipe_adjustments(recipe_id);
             CREATE INDEX IF NOT EXISTS idx_adjustment_type ON recipe_adjustments(adjustment_type);
+            CREATE INDEX IF NOT EXISTS idx_run_model ON training_runs(model_name);
+            CREATE INDEX IF NOT EXISTS idx_run_baseline ON training_runs(is_baseline);
+            CREATE INDEX IF NOT EXISTS idx_run_success ON training_runs(success);
+            CREATE INDEX IF NOT EXISTS idx_run_ppl ON training_runs(perplexity);
+            CREATE INDEX IF NOT EXISTS idx_run_created ON training_runs(created_at DESC);
         """)
         self.conn.commit()
 
@@ -1118,6 +1205,120 @@ class ArcFusionDB:
         return {r['adjustment_type']: r['count'] for r in rows}
 
     # -------------------------------------------------------------------------
+    # Training run operations
+    # -------------------------------------------------------------------------
+    def add_training_run(self, run: TrainingRun) -> str:
+        """Record a training run."""
+        self.conn.execute("""
+            INSERT OR REPLACE INTO training_runs
+            (run_id, model_name, d_model, n_layers, n_heads, vocab_size, batch_size,
+             learning_rate, max_steps, gpu_type, mixed_precision, parameters,
+             final_train_loss, eval_loss, perplexity, time_seconds, success, error,
+             is_baseline, baseline_run_id, vs_baseline_pct, recipe_id, engine_id, notes)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            run.run_id, run.model_name, run.d_model, run.n_layers, run.n_heads,
+            run.vocab_size, run.batch_size, run.learning_rate, run.max_steps,
+            run.gpu_type, 1 if run.mixed_precision else 0, run.parameters,
+            run.final_train_loss, run.eval_loss, run.perplexity, run.time_seconds,
+            1 if run.success else 0, run.error, 1 if run.is_baseline else 0,
+            run.baseline_run_id or None, run.vs_baseline_pct,
+            run.recipe_id or None, run.engine_id or None, run.notes
+        ))
+        self.conn.commit()
+        return run.run_id
+
+    def get_training_run(self, run_id: str) -> TrainingRun | None:
+        """Get a training run by ID."""
+        row = self.conn.execute(
+            "SELECT * FROM training_runs WHERE run_id = ?", (run_id,)
+        ).fetchone()
+        return self._row_to_training_run(row) if row else None
+
+    def _row_to_training_run(self, row) -> TrainingRun:
+        """Convert DB row to TrainingRun dataclass."""
+        return TrainingRun(
+            run_id=row['run_id'],
+            model_name=row['model_name'],
+            d_model=row['d_model'],
+            n_layers=row['n_layers'],
+            n_heads=row['n_heads'],
+            vocab_size=row['vocab_size'],
+            batch_size=row['batch_size'],
+            learning_rate=row['learning_rate'],
+            max_steps=row['max_steps'],
+            gpu_type=row['gpu_type'],
+            mixed_precision=bool(row['mixed_precision']),
+            parameters=row['parameters'],
+            final_train_loss=row['final_train_loss'],
+            eval_loss=row['eval_loss'],
+            perplexity=row['perplexity'],
+            time_seconds=row['time_seconds'],
+            success=bool(row['success']),
+            error=row['error'] or "",
+            is_baseline=bool(row['is_baseline']),
+            baseline_run_id=row['baseline_run_id'] or "",
+            vs_baseline_pct=row['vs_baseline_pct'],
+            recipe_id=row['recipe_id'] or "",
+            engine_id=row['engine_id'] or "",
+            notes=row['notes'] or "",
+            created_at=row['created_at'] or ""
+        )
+
+    def list_training_runs(
+        self,
+        model_name: str | None = None,
+        baseline_only: bool = False,
+        success_only: bool = True,
+        limit: int = 100
+    ) -> list[TrainingRun]:
+        """List training runs with optional filters."""
+        query = "SELECT * FROM training_runs WHERE 1=1"
+        params = []
+
+        if model_name:
+            query += " AND model_name = ?"
+            params.append(model_name)
+        if baseline_only:
+            query += " AND is_baseline = 1"
+        if success_only:
+            query += " AND success = 1"
+
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+
+        rows = self.conn.execute(query, params).fetchall()
+        return [self._row_to_training_run(r) for r in rows]
+
+    def get_latest_baseline(self) -> TrainingRun | None:
+        """Get the most recent successful baseline run."""
+        row = self.conn.execute("""
+            SELECT * FROM training_runs
+            WHERE is_baseline = 1 AND success = 1
+            ORDER BY created_at DESC
+            LIMIT 1
+        """).fetchone()
+        return self._row_to_training_run(row) if row else None
+
+    def get_training_leaderboard(self, limit: int = 20) -> list[TrainingRun]:
+        """Get top training runs by perplexity (lower is better)."""
+        rows = self.conn.execute("""
+            SELECT * FROM training_runs
+            WHERE success = 1
+            ORDER BY perplexity ASC
+            LIMIT ?
+        """, (limit,)).fetchall()
+        return [self._row_to_training_run(r) for r in rows]
+
+    def compare_to_baseline(self, run: TrainingRun, baseline: TrainingRun | None = None) -> float:
+        """Calculate percentage difference from baseline. Negative = better."""
+        if baseline is None:
+            baseline = self.get_latest_baseline()
+        if baseline is None or baseline.perplexity == 0:
+            return 0.0
+        return ((run.perplexity - baseline.perplexity) / baseline.perplexity) * 100
+
+    # -------------------------------------------------------------------------
     # Component compatibility operations (aggregate scores)
     # -------------------------------------------------------------------------
     def update_compatibility_scores(self):
@@ -1166,6 +1367,9 @@ class ArcFusionDB:
             'validated_dreams': self.conn.execute("SELECT COUNT(*) FROM dreamed_engines WHERE validated = 1").fetchone()[0],
             'recipes': self.conn.execute("SELECT COUNT(*) FROM recipes").fetchone()[0],
             'recipe_adjustments': self.conn.execute("SELECT COUNT(*) FROM recipe_adjustments").fetchone()[0],
+            'training_runs': self.conn.execute("SELECT COUNT(*) FROM training_runs").fetchone()[0],
+            'successful_runs': self.conn.execute("SELECT COUNT(*) FROM training_runs WHERE success = 1").fetchone()[0],
+            'baseline_runs': self.conn.execute("SELECT COUNT(*) FROM training_runs WHERE is_baseline = 1").fetchone()[0],
         }
 
     def close(self):
