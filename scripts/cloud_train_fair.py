@@ -1107,8 +1107,8 @@ def main():
     else:
         print(f"Baseline: {BASELINE_MODEL} - NO BASELINE DATA")
     print()
-    print(f"{'Model':<20} {'Params':>12} {'Eval Loss':>12} {'Perplexity':>12} {'vs Baseline':>14}")
-    print("-" * 70)
+    print(f"{'Model':<20} {'Params':>12} {'Perplexity':>12} {'vs Baseline':>14} {'Time':>10}")
+    print("-" * 78)
 
     sorted_results = sorted(
         [(k, v) for k, v in results.items() if v.get("success")],
@@ -1127,9 +1127,10 @@ def main():
         else:
             vs_baseline = "N/A"
         params = r.get("parameters", 0)
-        eval_loss = r.get("eval_loss", 0)
         ppl = r.get("perplexity", 0)
-        print(f"{name:<20} {params:>12,} {eval_loss:>12.4f} {ppl:>12.2f} {vs_baseline:>14}")
+        time_secs = r.get("time_seconds", 0)
+        time_str = f"{time_secs:.0f}s" if time_secs else "N/A"
+        print(f"{name:<20} {params:>12,} {ppl:>12.2f} {vs_baseline:>14} {time_str:>10}")
 
     # Save with metadata
     output = {
