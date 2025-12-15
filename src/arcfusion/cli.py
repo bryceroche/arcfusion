@@ -777,13 +777,11 @@ def cmd_validate(args: argparse.Namespace) -> None:
         # Step 5: Store results if requested
         if args.store and result.success:
             # Create a dreamed engine entry to associate results with
-            from .composer import EngineComposer
             composer = EngineComposer(db)
             components, _ = composer.dream(args.strategy, **kwargs)
 
             # Store benchmark results
             for bench_name, score in result.benchmarks.items():
-                from .db import BenchmarkResult
                 benchmark = BenchmarkResult(
                     engine_id=generated.name,  # Use name as pseudo-ID
                     benchmark_name=bench_name,
