@@ -942,6 +942,114 @@ def _insights_for_dreaming(db: ArcFusionDB, args: argparse.Namespace) -> None:
     print("Use 'arcfusion dream results_aware' to apply these insights automatically.")
 
 
+def cmd_recipe(args: argparse.Namespace) -> None:
+    """Get model recipe (code) from a training run to rebuild the model."""
+    with ArcFusionDB(args.db) as db:
+        # Find the run
+        if args.run_id:
+            run = db.get_training_run(args.run_id)
+        elif args.model_name:
+            runs = db.list_training_runs(model_name=args.model_name, success_only=True, limit=1)
+            run = runs[0] if runs else None
+        else:
+            _cli_error("Either --run-id or --model is required")
+            return
+
+        if not run:
+            _cli_error(f"No training run found")
+            return
+
+        if not run.model_code:
+            _cli_error(f"No model code stored for run {run.run_id}")
+            return
+
+        if args.output:
+            with open(args.output, "w") as f:
+                f.write(run.model_code)
+            print(f"Saved model code to {args.output}")
+            print(f"  Model: {run.model_name}")
+            print(f"  PPL: {run.perplexity:.1f}")
+            print(f"  Code hash: {run.code_hash}")
+        else:
+            print(f"# Model: {run.model_name}")
+            print(f"# PPL: {run.perplexity:.1f}")
+            print(f"# Code hash: {run.code_hash}")
+            print(f"# Run ID: {run.run_id}")
+            print()
+            print(run.model_code)
+
+
+def cmd_leaderboard(args: argparse.Namespace) -> None:
+    """Show training runs leaderboard with rankings and tiers."""
+    with ArcFusionDB(args.db) as db:
+        runs = db.list_training_runs(success_only=True, limit=args.limit)
+
+        if not runs:
+            print("No training runs found.")
+            return
+
+        # Get baseline for comparison
+        baseline_runs = [r for r in runs if r.model_name == args.baseline]
+        baseline_ppl = baseline_runs[0].perplexity if baseline_runs else None
+        baseline_time = baseline_runs[0].time_seconds if baseline_runs else None
+
+        # Sort by the requested metric
+        if args.sort == "ppl":
+            runs = sorted(runs, key=lambda r: r.perplexity)
+        elif args.sort == "time":
+            runs = sorted(runs, key=lambda r: r.time_seconds)
+        elif args.sort == "efficiency":
+            # Lower PPL and lower time = better efficiency
+            runs = sorted(runs, key=lambda r: r.perplexity * r.time_seconds)
+
+        # Classify tiers
+        def get_tier(run):
+            if baseline_ppl is None:
+                return "N/A"
+            ppl_ratio = run.perplexity / baseline_ppl
+            time_ratio = run.time_seconds / baseline_time if baseline_time else 1
+
+            if ppl_ratio < 0.9 and time_ratio < 0.5:
+                return "S"  # Best quality AND fast
+            elif ppl_ratio < 0.95:
+                return "A"  # Better quality
+            elif ppl_ratio < 1.05:
+                return "B"  # Similar quality
+            elif time_ratio < 0.5:
+                return "C"  # Worse quality but fast
+            else:
+                return "D"  # Worse quality
+
+        # Print header
+        print(f"{'Rank':<5} {'Model':<30} {'PPL':>8} {'Time':>8} {'vs Base':>9} {'Tier':>5}")
+        print("-" * 70)
+
+        for i, run in enumerate(runs, 1):
+            vs_base = ""
+            if baseline_ppl:
+                pct = ((run.perplexity - baseline_ppl) / baseline_ppl) * 100
+                vs_base = f"{pct:+.1f}%"
+
+            tier = get_tier(run)
+            model_name = run.model_name.replace("Transformer_", "")[:28]
+
+            print(f"{i:<5} {model_name:<30} {run.perplexity:>8.1f} {run.time_seconds:>7.0f}s {vs_base:>9} {tier:>5}")
+
+        # Summary
+        print("-" * 70)
+        print(f"Total: {len(runs)} runs | Baseline: {args.baseline}")
+        if baseline_ppl:
+            print(f"Baseline PPL: {baseline_ppl:.1f} | Baseline Time: {baseline_time:.0f}s")
+
+        # Tier legend
+        print("\nTier Legend:")
+        print("  S: Best quality + Fast (<90% PPL, <50% time)")
+        print("  A: Better quality (<95% PPL)")
+        print("  B: Similar quality (95-105% PPL)")
+        print("  C: Fast but worse quality (>105% PPL, <50% time)")
+        print("  D: Worse quality and slower")
+
+
 def main() -> None:
     """
     ArcFusion CLI entry point.
@@ -1145,6 +1253,29 @@ Examples:
     insights_parser.add_argument("--limit", "-l", type=int, default=20, help="Max results (default: 20)")
     insights_parser.add_argument("--id", dest="insight_id", help="Insight ID for show action")
 
+    # recipe (get model code from training run)
+    recipe_parser = subparsers.add_parser(
+        "recipe",
+        help="Get model code (recipe) to rebuild any trained model",
+        description="Retrieve the full PyTorch model code for any training run. "
+                    "Use this to rebuild or modify any model from the leaderboard."
+    )
+    recipe_parser.add_argument("--run-id", "-r", dest="run_id", help="Training run ID")
+    recipe_parser.add_argument("--model", "-m", dest="model_name", help="Model name (uses most recent run)")
+    recipe_parser.add_argument("--output", "-o", help="Output file (prints to stdout if not specified)")
+
+    # leaderboard (ranked training runs with tiers)
+    leaderboard_parser = subparsers.add_parser(
+        "leaderboard",
+        help="Show ranked leaderboard of training runs with tier classifications",
+        description="Display all training runs sorted by quality or efficiency, with tier classifications."
+    )
+    leaderboard_parser.add_argument("--sort", "-s", choices=["ppl", "time", "efficiency"], default="ppl",
+                                    help="Sort by: ppl (quality), time, efficiency (default: ppl)")
+    leaderboard_parser.add_argument("--baseline", "-b", default="Transformer_MHA",
+                                    help="Baseline model for comparison (default: Transformer_MHA)")
+    leaderboard_parser.add_argument("--limit", "-l", type=int, default=50, help="Max results (default: 50)")
+
     # web (web UI server)
     web_parser = subparsers.add_parser(
         "web",
@@ -1173,6 +1304,8 @@ Examples:
         "validate": cmd_validate,
         "export-results": cmd_export_results,
         "insights": cmd_insights,
+        "recipe": cmd_recipe,
+        "leaderboard": cmd_leaderboard,
         "web": cmd_web,
     }
 
