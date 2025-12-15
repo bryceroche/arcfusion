@@ -37,4 +37,5 @@ Thumbs.db
 .pytest_cache/
 .coverage
 htmlcov/
+other/
 .venv-modal/

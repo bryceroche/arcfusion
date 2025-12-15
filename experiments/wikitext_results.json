@@ -1,0 +1,29 @@
+{
+  "MHA": {
+    "success": true,
+    "model_type": "MHA",
+    "test_loss": 7.340262784957885,
+    "test_ppl": 1541.1170428364273,
+    "parameters": 16549632,
+    "time_seconds": 175.7687473297119,
+    "error": null
+  },
+  "GQA": {
+    "success": true,
+    "model_type": "GQA",
+    "test_loss": 7.355246791839599,
+    "test_ppl": 1564.3830247223711,
+    "parameters": 16154880,
+    "time_seconds": 189.38826084136963,
+    "error": null
+  },
+  "MQA": {
+    "success": true,
+    "model_type": "MQA",
+    "test_loss": 7.516248178482056,
+    "test_ppl": 1837.6597727842434,
+    "parameters": 16089088,
+    "time_seconds": 172.54614114761353,
+    "error": null
+  }
+}
