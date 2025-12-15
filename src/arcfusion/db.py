@@ -228,9 +228,13 @@ class TrainingRun:
     is_baseline: bool = False
     baseline_run_id: str = ""  # Links to the baseline run for comparison
     vs_baseline_pct: float = 0.0  # % difference from baseline (negative = better)
+    # Reproducibility: exact model code used
+    model_code: str = ""  # Full Python code for the model
+    code_hash: str = ""  # SHA256 hash of model_code for matching
     # Metadata
     recipe_id: str = ""  # Links to recipe if dreamed
     engine_id: str = ""  # Links to engine if known architecture
+    experiment_id: str = ""  # Links to experiment grouping
     notes: str = ""
     run_id: str = ""
     created_at: str = ""
@@ -239,6 +243,60 @@ class TrainingRun:
         if not self.run_id:
             content = f"{self.model_name}{self.d_model}{self.n_layers}{self.max_steps}{self.gpu_type}{self.seed}{self.created_at}"
             self.run_id = hashlib.sha256(content.encode()).hexdigest()[:12]
+        # Auto-compute code_hash if model_code provided but no hash
+        if self.model_code and not self.code_hash:
+            self.code_hash = hashlib.sha256(self.model_code.encode()).hexdigest()[:16]
+
+
+@dataclass
+class Experiment:
+    """
+    Groups related training runs into a named experiment.
+
+    Use this to track hypothesis-driven experiments like:
+    - "Hybrid attention patterns sweep"
+    - "SSM vs Attention at different scales"
+    - "GQA n_kv_heads ablation"
+    """
+    name: str
+    description: str = ""
+    hypothesis: str = ""  # What we're testing
+    status: str = "in_progress"  # in_progress, completed, abandoned
+    run_ids: list = field(default_factory=list)  # Training run IDs in this experiment
+    tags: list = field(default_factory=list)  # For filtering: ["hybrid", "attention", "scaling"]
+    experiment_id: str = ""
+    created_at: str = ""
+    completed_at: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.experiment_id:
+            content = f"{self.name}{self.description}{self.hypothesis}"
+            self.experiment_id = hashlib.sha256(content.encode()).hexdigest()[:12]
+
+
+@dataclass
+class Finding:
+    """
+    A conclusion backed by experimental evidence.
+
+    Records insights like "Mamba beats MHA by 20% at equal params"
+    with links to the supporting training runs.
+    """
+    title: str  # e.g., "SSM outperforms attention on WikiText-2"
+    description: str = ""  # Full explanation
+    experiment_id: str = ""  # Which experiment produced this
+    evidence_run_ids: list = field(default_factory=list)  # Supporting run IDs
+    confidence: str = "medium"  # high, medium, low
+    delta_vs_baseline: float = 0.0  # % change (negative = better)
+    statistical_significance: float = 0.0  # p-value or confidence interval
+    tags: list = field(default_factory=list)  # For filtering
+    finding_id: str = ""
+    created_at: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.finding_id:
+            content = f"{self.title}{self.experiment_id}{json.dumps(self.evidence_run_ids)}"
+            self.finding_id = hashlib.sha256(content.encode()).hexdigest()[:12]
 
 
 class ArcFusionDB:
@@ -248,6 +306,7 @@ class ArcFusionDB:
         self.db_path = Path(db_path)
         self.conn = sqlite3.connect(str(self.db_path))
         self.conn.row_factory = sqlite3.Row
+        self._migrate()  # Run migrations BEFORE schema init (to add columns needed for new indexes)
         self._init_schema()
 
     def _init_schema(self):
@@ -426,14 +485,47 @@ class ArcFusionDB:
                 is_baseline INTEGER DEFAULT 0,
                 baseline_run_id TEXT,
                 vs_baseline_pct REAL DEFAULT 0.0,
+                -- Reproducibility: exact model code
+                model_code TEXT,
+                code_hash TEXT,
                 -- Links
                 recipe_id TEXT,
                 engine_id TEXT,
+                experiment_id TEXT,
                 notes TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (recipe_id) REFERENCES recipes(recipe_id),
                 FOREIGN KEY (engine_id) REFERENCES engines(engine_id),
-                FOREIGN KEY (baseline_run_id) REFERENCES training_runs(run_id)
+                FOREIGN KEY (baseline_run_id) REFERENCES training_runs(run_id),
+                FOREIGN KEY (experiment_id) REFERENCES experiments(experiment_id)
+            );
+
+            -- Experiments: group related training runs
+            CREATE TABLE IF NOT EXISTS experiments (
+                experiment_id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                description TEXT,
+                hypothesis TEXT,
+                status TEXT DEFAULT 'in_progress',
+                run_ids TEXT,
+                tags TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                completed_at TIMESTAMP
+            );
+
+            -- Findings: conclusions backed by evidence
+            CREATE TABLE IF NOT EXISTS findings (
+                finding_id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                description TEXT,
+                experiment_id TEXT,
+                evidence_run_ids TEXT,
+                confidence TEXT DEFAULT 'medium',
+                delta_vs_baseline REAL DEFAULT 0.0,
+                statistical_significance REAL DEFAULT 0.0,
+                tags TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (experiment_id) REFERENCES experiments(experiment_id)
             );
 
             -- Indexes
@@ -460,8 +552,46 @@ class ArcFusionDB:
             CREATE INDEX IF NOT EXISTS idx_run_success ON training_runs(success);
             CREATE INDEX IF NOT EXISTS idx_run_ppl ON training_runs(perplexity);
             CREATE INDEX IF NOT EXISTS idx_run_created ON training_runs(created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_run_experiment ON training_runs(experiment_id);
+            CREATE INDEX IF NOT EXISTS idx_run_code_hash ON training_runs(code_hash);
+            -- Experiments indexes
+            CREATE INDEX IF NOT EXISTS idx_exp_status ON experiments(status);
+            CREATE INDEX IF NOT EXISTS idx_exp_name ON experiments(name);
+            CREATE INDEX IF NOT EXISTS idx_exp_created ON experiments(created_at DESC);
+            -- Findings indexes
+            CREATE INDEX IF NOT EXISTS idx_finding_exp ON findings(experiment_id);
+            CREATE INDEX IF NOT EXISTS idx_finding_confidence ON findings(confidence);
+            CREATE INDEX IF NOT EXISTS idx_finding_created ON findings(created_at DESC);
         """)
         self.conn.commit()
+
+    def _migrate(self):
+        """Run schema migrations for existing databases."""
+        # Check if training_runs table exists (skip if fresh DB)
+        cursor = self.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='training_runs'"
+        )
+        if not cursor.fetchone():
+            return  # Fresh database, nothing to migrate
+
+        # Get existing columns in training_runs
+        cursor = self.conn.execute("PRAGMA table_info(training_runs)")
+        columns = {row[1] for row in cursor.fetchall()}
+
+        # Migration: Add model_code, code_hash, experiment_id to training_runs
+        migrations = [
+            ("training_runs", "model_code", "TEXT"),
+            ("training_runs", "code_hash", "TEXT"),
+            ("training_runs", "experiment_id", "TEXT"),
+        ]
+
+        for table, column, col_type in migrations:
+            if column not in columns:
+                try:
+                    self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
+                    self.conn.commit()
+                except sqlite3.OperationalError:
+                    pass  # Column already exists or other issue
 
     # -------------------------------------------------------------------------
     # Component operations
@@ -1216,8 +1346,9 @@ class ArcFusionDB:
             (run_id, model_name, d_model, n_layers, n_heads, vocab_size, batch_size,
              learning_rate, max_steps, seed, gpu_type, mixed_precision, parameters,
              final_train_loss, eval_loss, perplexity, time_seconds, success, error,
-             is_baseline, baseline_run_id, vs_baseline_pct, recipe_id, engine_id, notes)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             is_baseline, baseline_run_id, vs_baseline_pct, model_code, code_hash,
+             recipe_id, engine_id, experiment_id, notes)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             run.run_id, run.model_name, run.d_model, run.n_layers, run.n_heads,
             run.vocab_size, run.batch_size, run.learning_rate, run.max_steps,
@@ -1225,7 +1356,8 @@ class ArcFusionDB:
             run.final_train_loss, run.eval_loss, run.perplexity, run.time_seconds,
             1 if run.success else 0, run.error, 1 if run.is_baseline else 0,
             run.baseline_run_id or None, run.vs_baseline_pct,
-            run.recipe_id or None, run.engine_id or None, run.notes
+            run.model_code or None, run.code_hash or None,
+            run.recipe_id or None, run.engine_id or None, run.experiment_id or None, run.notes
         ))
         self.conn.commit()
         return run.run_id
@@ -1239,6 +1371,7 @@ class ArcFusionDB:
 
     def _row_to_training_run(self, row) -> TrainingRun:
         """Convert DB row to TrainingRun dataclass."""
+        keys = row.keys()
         return TrainingRun(
             run_id=row['run_id'],
             model_name=row['model_name'],
@@ -1249,7 +1382,7 @@ class ArcFusionDB:
             batch_size=row['batch_size'],
             learning_rate=row['learning_rate'],
             max_steps=row['max_steps'],
-            seed=row['seed'] if 'seed' in row.keys() else 42,
+            seed=row['seed'] if 'seed' in keys else 42,
             gpu_type=row['gpu_type'],
             mixed_precision=bool(row['mixed_precision']),
             parameters=row['parameters'],
@@ -1262,8 +1395,13 @@ class ArcFusionDB:
             is_baseline=bool(row['is_baseline']),
             baseline_run_id=row['baseline_run_id'] or "",
             vs_baseline_pct=row['vs_baseline_pct'],
+            # Reproducibility fields
+            model_code=row['model_code'] or "" if 'model_code' in keys else "",
+            code_hash=row['code_hash'] or "" if 'code_hash' in keys else "",
+            # Links
             recipe_id=row['recipe_id'] or "",
             engine_id=row['engine_id'] or "",
+            experiment_id=row['experiment_id'] or "" if 'experiment_id' in keys else "",
             notes=row['notes'] or "",
             created_at=row['created_at'] or ""
         )
@@ -1394,6 +1532,191 @@ class ArcFusionDB:
         return needed
 
     # -------------------------------------------------------------------------
+    # Experiment operations
+    # -------------------------------------------------------------------------
+    def add_experiment(self, exp: Experiment) -> str:
+        """Create or update an experiment."""
+        self.conn.execute("""
+            INSERT OR REPLACE INTO experiments
+            (experiment_id, name, description, hypothesis, status, run_ids, tags, created_at, completed_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), ?)
+        """, (
+            exp.experiment_id,
+            exp.name,
+            exp.description,
+            exp.hypothesis,
+            exp.status,
+            json.dumps(exp.run_ids) if exp.run_ids else None,
+            json.dumps(exp.tags) if exp.tags else None,
+            exp.created_at or None,
+            exp.completed_at or None
+        ))
+        self.conn.commit()
+        return exp.experiment_id
+
+    def get_experiment(self, experiment_id: str) -> Experiment | None:
+        """Get an experiment by ID."""
+        row = self.conn.execute(
+            "SELECT * FROM experiments WHERE experiment_id = ?", (experiment_id,)
+        ).fetchone()
+        return self._row_to_experiment(row) if row else None
+
+    def _row_to_experiment(self, row) -> Experiment:
+        """Convert DB row to Experiment dataclass."""
+        return Experiment(
+            experiment_id=row['experiment_id'],
+            name=row['name'],
+            description=row['description'] or "",
+            hypothesis=row['hypothesis'] or "",
+            status=row['status'] or "in_progress",
+            run_ids=self._safe_json_loads(row['run_ids'], []),
+            tags=self._safe_json_loads(row['tags'], []),
+            created_at=row['created_at'] or "",
+            completed_at=row['completed_at'] or ""
+        )
+
+    def list_experiments(
+        self,
+        status: str | None = None,
+        tag: str | None = None,
+        limit: int = 100
+    ) -> list[Experiment]:
+        """List experiments with optional filters."""
+        query = "SELECT * FROM experiments WHERE 1=1"
+        params = []
+
+        if status:
+            query += " AND status = ?"
+            params.append(status)
+        if tag:
+            query += " AND tags LIKE ?"
+            params.append(f'%"{tag}"%')
+
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+
+        rows = self.conn.execute(query, params).fetchall()
+        return [self._row_to_experiment(r) for r in rows]
+
+    def add_run_to_experiment(self, experiment_id: str, run_id: str) -> bool:
+        """Add a training run to an experiment."""
+        exp = self.get_experiment(experiment_id)
+        if not exp:
+            return False
+
+        if run_id not in exp.run_ids:
+            exp.run_ids.append(run_id)
+            self.conn.execute(
+                "UPDATE experiments SET run_ids = ? WHERE experiment_id = ?",
+                (json.dumps(exp.run_ids), experiment_id)
+            )
+            self.conn.commit()
+
+            # Also update the run's experiment_id
+            self.conn.execute(
+                "UPDATE training_runs SET experiment_id = ? WHERE run_id = ?",
+                (experiment_id, run_id)
+            )
+            self.conn.commit()
+        return True
+
+    def complete_experiment(self, experiment_id: str) -> bool:
+        """Mark an experiment as completed."""
+        from datetime import datetime
+        cursor = self.conn.execute("""
+            UPDATE experiments
+            SET status = 'completed', completed_at = ?
+            WHERE experiment_id = ?
+        """, (datetime.now().isoformat(), experiment_id))
+        self.conn.commit()
+        return cursor.rowcount > 0
+
+    def get_experiment_runs(self, experiment_id: str) -> list[TrainingRun]:
+        """Get all training runs in an experiment."""
+        exp = self.get_experiment(experiment_id)
+        if not exp or not exp.run_ids:
+            return []
+        return [r for rid in exp.run_ids if (r := self.get_training_run(rid))]
+
+    # -------------------------------------------------------------------------
+    # Finding operations
+    # -------------------------------------------------------------------------
+    def add_finding(self, finding: Finding) -> str:
+        """Record a finding (conclusion backed by evidence)."""
+        self.conn.execute("""
+            INSERT OR REPLACE INTO findings
+            (finding_id, title, description, experiment_id, evidence_run_ids,
+             confidence, delta_vs_baseline, statistical_significance, tags, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP))
+        """, (
+            finding.finding_id,
+            finding.title,
+            finding.description,
+            finding.experiment_id or None,
+            json.dumps(finding.evidence_run_ids) if finding.evidence_run_ids else None,
+            finding.confidence,
+            finding.delta_vs_baseline,
+            finding.statistical_significance,
+            json.dumps(finding.tags) if finding.tags else None,
+            finding.created_at or None
+        ))
+        self.conn.commit()
+        return finding.finding_id
+
+    def get_finding(self, finding_id: str) -> Finding | None:
+        """Get a finding by ID."""
+        row = self.conn.execute(
+            "SELECT * FROM findings WHERE finding_id = ?", (finding_id,)
+        ).fetchone()
+        return self._row_to_finding(row) if row else None
+
+    def _row_to_finding(self, row) -> Finding:
+        """Convert DB row to Finding dataclass."""
+        return Finding(
+            finding_id=row['finding_id'],
+            title=row['title'],
+            description=row['description'] or "",
+            experiment_id=row['experiment_id'] or "",
+            evidence_run_ids=self._safe_json_loads(row['evidence_run_ids'], []),
+            confidence=row['confidence'] or "medium",
+            delta_vs_baseline=row['delta_vs_baseline'] or 0.0,
+            statistical_significance=row['statistical_significance'] or 0.0,
+            tags=self._safe_json_loads(row['tags'], []),
+            created_at=row['created_at'] or ""
+        )
+
+    def list_findings(
+        self,
+        experiment_id: str | None = None,
+        confidence: str | None = None,
+        tag: str | None = None,
+        limit: int = 100
+    ) -> list[Finding]:
+        """List findings with optional filters."""
+        query = "SELECT * FROM findings WHERE 1=1"
+        params = []
+
+        if experiment_id:
+            query += " AND experiment_id = ?"
+            params.append(experiment_id)
+        if confidence:
+            query += " AND confidence = ?"
+            params.append(confidence)
+        if tag:
+            query += " AND tags LIKE ?"
+            params.append(f'%"{tag}"%')
+
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+
+        rows = self.conn.execute(query, params).fetchall()
+        return [self._row_to_finding(r) for r in rows]
+
+    def get_findings_for_experiment(self, experiment_id: str) -> list[Finding]:
+        """Get all findings associated with an experiment."""
+        return self.list_findings(experiment_id=experiment_id)
+
+    # -------------------------------------------------------------------------
     # Component compatibility operations (aggregate scores)
     # -------------------------------------------------------------------------
     def update_compatibility_scores(self):
@@ -1445,6 +1768,9 @@ class ArcFusionDB:
             'training_runs': self.conn.execute("SELECT COUNT(*) FROM training_runs").fetchone()[0],
             'successful_runs': self.conn.execute("SELECT COUNT(*) FROM training_runs WHERE success = 1").fetchone()[0],
             'baseline_runs': self.conn.execute("SELECT COUNT(*) FROM training_runs WHERE is_baseline = 1").fetchone()[0],
+            'experiments': self.conn.execute("SELECT COUNT(*) FROM experiments").fetchone()[0],
+            'experiments_completed': self.conn.execute("SELECT COUNT(*) FROM experiments WHERE status = 'completed'").fetchone()[0],
+            'findings': self.conn.execute("SELECT COUNT(*) FROM findings").fetchone()[0],
         }
 
     def close(self):
