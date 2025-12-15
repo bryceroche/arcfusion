@@ -1,0 +1,57 @@
+[
+  {
+    "name": "Transformer_Mamba",
+    "perplexity": 226.14,
+    "ppl_vs_baseline": "+19.9%",
+    "time_seconds": 725.0,
+    "time_ratio": "12.1x",
+    "efficiency": 2.084420447335792,
+    "combined_score": 10.672045711079491,
+    "parameters": 29578321,
+    "is_baseline": false
+  },
+  {
+    "name": "Transformer_Hybrid",
+    "perplexity": 242.9020212620186,
+    "ppl_vs_baseline": "+13.9%",
+    "time_seconds": 565.5282828807831,
+    "time_ratio": "9.4x",
+    "efficiency": 1.6552282969669623,
+    "combined_score": 6.838813754013913,
+    "parameters": 30699089,
+    "is_baseline": false
+  },
+  {
+    "name": "Transformer_MHA",
+    "perplexity": 282.2647381813213,
+    "ppl_vs_baseline": "+0.0%",
+    "time_seconds": 60.0,
+    "time_ratio": "1.0x",
+    "efficiency": 0.0,
+    "combined_score": 0.0,
+    "parameters": 30221393,
+    "is_baseline": true
+  },
+  {
+    "name": "Transformer_MQA",
+    "perplexity": 294.051266918279,
+    "ppl_vs_baseline": "-4.2%",
+    "time_seconds": 53.70865225791931,
+    "time_ratio": "0.9x",
+    "efficiency": -1.608287891160483,
+    "combined_score": -2.7786690284328586,
+    "parameters": 29760849,
+    "is_baseline": false
+  },
+  {
+    "name": "Transformer_GQA",
+    "perplexity": 294.03171464649597,
+    "ppl_vs_baseline": "-4.2%",
+    "time_seconds": 61.20133686065674,
+    "time_ratio": "1.0x",
+    "efficiency": -1.504126734150966,
+    "combined_score": -2.9439701426216267,
+    "parameters": 29826641,
+    "is_baseline": false
+  }
+]
