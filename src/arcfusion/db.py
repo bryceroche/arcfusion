@@ -1559,12 +1559,27 @@ class ArcFusionDB:
             elif run.perplexity < best_by_model[run.model_name].perplexity:
                 best_by_model[run.model_name] = run
 
+        # Get baseline time for efficiency calculation
+        baseline_time = baseline_stats["runs"][0].time_seconds if baseline_stats["runs"] else 0
+
         # Build results dict
         results = {}
         for model_name, run in best_by_model.items():
             vs_baseline = 0.0
-            if baseline_ppl > 0 and model_name != baseline_model:
-                vs_baseline = ((run.perplexity - baseline_ppl) / baseline_ppl) * 100
+            quality_score = 1.0
+            speed_score = 1.0
+            efficiency_score = 1.0
+
+            if baseline_ppl > 0:
+                quality_score = baseline_ppl / run.perplexity  # >1 = better quality
+                if model_name != baseline_model:
+                    vs_baseline = ((run.perplexity - baseline_ppl) / baseline_ppl) * 100
+
+            if baseline_time > 0:
+                speed_score = baseline_time / run.time_seconds  # >1 = faster
+
+            # Efficiency = quality * speed (rewards both low ppl AND fast training)
+            efficiency_score = quality_score * speed_score
 
             results[model_name] = {
                 "success": run.success,
@@ -1574,6 +1589,9 @@ class ArcFusionDB:
                 "perplexity": run.perplexity,
                 "time_seconds": run.time_seconds,
                 "vs_baseline_pct": vs_baseline,
+                "quality_score": round(quality_score, 3),
+                "speed_score": round(speed_score, 3),
+                "efficiency_score": round(efficiency_score, 3),
                 "run_id": run.run_id,
                 "created_at": run.created_at,
             }
