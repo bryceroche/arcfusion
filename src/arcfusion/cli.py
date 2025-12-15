@@ -6,7 +6,7 @@ import argparse
 import os
 import sys
 from . import __version__
-from .db import ArcFusionDB, BenchmarkResult
+from .db import ArcFusionDB, BenchmarkResult, generate_training_insights
 from .composer import EngineComposer
 from .seeds import seed_transformers, seed_modern_architectures
 from .fetcher import ArxivFetcher
@@ -818,6 +818,130 @@ def cmd_export_results(args: argparse.Namespace) -> None:
             print(json.dumps(results, indent=2, default=str))
 
 
+def cmd_insights(args: argparse.Namespace) -> None:
+    """List, generate, or query training insights."""
+    with ArcFusionDB(args.db) as db:
+        if args.action == "list":
+            _insights_list(db, args)
+        elif args.action == "generate":
+            _insights_generate(db, args)
+        elif args.action == "show":
+            _insights_show(db, args)
+        elif args.action == "for-dreaming":
+            _insights_for_dreaming(db, args)
+
+
+def _insights_list(db: ArcFusionDB, args: argparse.Namespace) -> None:
+    """List training insights."""
+    insights = db.get_insights(
+        category=args.category,
+        tags=args.tags,
+        min_confidence=args.min_confidence,
+        limit=args.limit,
+    )
+
+    if not insights:
+        print("No insights found. Run 'arcfusion insights generate' to create some.")
+        return
+
+    print(f"Training Insights ({len(insights)}):")
+    print(SEPARATOR)
+
+    for insight in insights:
+        confidence_bar = "*" * int(insight.confidence * 5)
+        print(f"\n[{insight.category}] {insight.title}")
+        print(f"  Confidence: {insight.confidence:.0%} {confidence_bar}")
+        if insight.description:
+            # Truncate long descriptions
+            desc = insight.description[:100] + "..." if len(insight.description) > 100 else insight.description
+            print(f"  {desc}")
+        if insight.tags:
+            print(f"  Tags: {insight.tags}")
+        if insight.source_comparison:
+            print(f"  Source: {insight.source_comparison}")
+
+
+def _insights_generate(db: ArcFusionDB, args: argparse.Namespace) -> None:
+    """Generate new insights from training data."""
+    print("Generating insights from training data...")
+    print(SEPARATOR)
+
+    new_insights = generate_training_insights(db)
+
+    if not new_insights:
+        print("No new insights generated.")
+        print("This could mean:")
+        print("  - No training runs in database")
+        print("  - All possible insights already exist")
+        print("  - Insufficient data for comparisons")
+        return
+
+    print(f"\nGenerated {len(new_insights)} new insights:")
+    for insight in new_insights:
+        print(f"\n  [{insight.category}] {insight.title}")
+        if insight.description:
+            print(f"    {insight.description[:80]}...")
+
+
+def _insights_show(db: ArcFusionDB, args: argparse.Namespace) -> None:
+    """Show detailed info for a specific insight."""
+    import json
+
+    if not args.insight_id:
+        _cli_error("--id required for show action")
+
+    insight = db.get_insight(args.insight_id)
+    if not insight:
+        _cli_error(f"Insight '{args.insight_id}' not found")
+
+    print(f"Insight: {insight.title}")
+    print(SEPARATOR)
+    print(f"  ID: {insight.insight_id}")
+    print(f"  Category: {insight.category}")
+    print(f"  Confidence: {insight.confidence:.0%}")
+    print(f"  Created: {insight.created_at}")
+    if insight.description:
+        print(f"\n  Description:")
+        print(f"    {insight.description}")
+    if insight.source_run_id:
+        print(f"\n  Source run: {insight.source_run_id}")
+    if insight.source_comparison:
+        print(f"  Comparison: {insight.source_comparison}")
+    if insight.tags:
+        print(f"  Tags: {insight.tags}")
+    if insight.evidence_json:
+        print(f"\n  Evidence:")
+        try:
+            evidence = json.loads(insight.evidence_json)
+            for k, v in evidence.items():
+                print(f"    {k}: {v}")
+        except json.JSONDecodeError:
+            print(f"    {insight.evidence_json}")
+
+
+def _insights_for_dreaming(db: ArcFusionDB, args: argparse.Namespace) -> None:
+    """Show insights formatted for use in dream strategies."""
+    insights_dict = db.get_insights_for_dreaming()
+
+    if not insights_dict:
+        print("No insights available for dreaming.")
+        print("Run 'arcfusion insights generate' first.")
+        return
+
+    print("Insights for Dream Strategies")
+    print(SECTION_SEPARATOR)
+
+    for category, insights in insights_dict.items():
+        print(f"\n{category.upper()}:")
+        for insight in insights[:3]:  # Top 3 per category
+            print(f"  - {insight['title']} ({insight['confidence']:.0%})")
+            if insight.get('description'):
+                print(f"      {insight['description'][:60]}...")
+
+    print(f"\n{SEPARATOR}")
+    print("Use 'arcfusion dream results_aware' to apply these insights automatically.")
+
+
 def main() -> None:
     """
     ArcFusion CLI entry point.
@@ -1003,6 +1127,24 @@ Examples:
     export_parser.add_argument("--baseline", "-b", default="Transformer_MHA", help="Baseline model name (default: Transformer_MHA)")
     export_parser.add_argument("--update-baseline", action="store_true", help="Update vs_baseline_pct for all runs before export")
 
+    # insights (training insights management)
+    insights_parser = subparsers.add_parser(
+        "insights",
+        help="List, generate, and query training insights",
+        description="Auto-generated insights from training runs help inform dream strategies. "
+                    "Insights compare model performance against baselines and detect patterns."
+    )
+    insights_parser.add_argument(
+        "action",
+        choices=["list", "generate", "show", "for-dreaming"],
+        help="Action: list (show all), generate (create from training data), show (details), for-dreaming (formatted for dream strategies)"
+    )
+    insights_parser.add_argument("--category", "-c", help="Filter by category (architecture, attention, efficiency, training)")
+    insights_parser.add_argument("--tags", "-t", help="Filter by tags (comma-separated)")
+    insights_parser.add_argument("--min-confidence", type=float, default=0.0, help="Minimum confidence (0-1)")
+    insights_parser.add_argument("--limit", "-l", type=int, default=20, help="Max results (default: 20)")
+    insights_parser.add_argument("--id", dest="insight_id", help="Insight ID for show action")
+
     # web (web UI server)
     web_parser = subparsers.add_parser(
         "web",
@@ -1030,6 +1172,7 @@ Examples:
         "benchmark": cmd_benchmark,
         "validate": cmd_validate,
         "export-results": cmd_export_results,
+        "insights": cmd_insights,
         "web": cmd_web,
     }
 

@@ -1270,6 +1270,22 @@ def main():
     print(f"  Training runs: {stats.get('training_runs', 0)}")
     print(f"  Successful: {stats.get('successful_runs', 0)}")
     print(f"  Baselines: {stats.get('baseline_runs', 0)}")
+
+    # Auto-generate insights from training results
+    print(f"\n{'='*70}")
+    print("GENERATING TRAINING INSIGHTS")
+    print("=" * 70)
+    from db import generate_training_insights
+    new_insights = generate_training_insights(db)
+    if new_insights:
+        print(f"\nGenerated {len(new_insights)} new insights:")
+        for insight in new_insights:
+            print(f"  [{insight.category}] {insight.title}")
+            if insight.description:
+                print(f"      {insight.description[:80]}...")
+    else:
+        print("No new insights generated (insufficient data or all insights already exist)")
+
     db.close()
 
 

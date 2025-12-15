@@ -585,13 +585,14 @@ class EngineComposer:
         verbose: bool = True
     ) -> tuple[list['Component'], dict]:
         """
-        Compose an architecture informed by past benchmark results.
+        Compose an architecture informed by past benchmark results AND training insights.
 
         Acts like an ML researcher studying what worked before:
         1. Queries past training results from DB
-        2. Identifies winning components for quality vs speed
-        3. Generates informed architecture hypotheses
-        4. Returns components with reasoning metadata
+        2. Queries auto-generated insights from training_insights table
+        3. Identifies winning components for quality vs speed
+        4. Generates informed architecture hypotheses
+        5. Returns components with reasoning metadata
 
         Args:
             optimize_for: "quality", "speed", or "efficiency" (default)
@@ -604,15 +605,29 @@ class EngineComposer:
         # Get performance analysis from DB
         stats = self.db.get_model_performance_stats()
 
+        # Get insights from training_insights table
+        insights_by_category = self.db.get_insights_for_dreaming()
+
         reasoning = {
             "optimize_for": optimize_for,
             "insights": stats.get("insights", []),
             "recommendations": stats.get("recommendations", []),
+            "training_insights": insights_by_category,
             "design_choices": [],
         }
 
+        # Add insights to reasoning if available
+        if insights_by_category:
+            for cat, cat_insights in insights_by_category.items():
+                for ins in cat_insights[:2]:  # Top 2 per category
+                    reasoning["insights"].append(f"[{cat}] {ins['title']}")
+
         if not stats.get("rankings") or not stats["rankings"].get("by_quality"):
-            # No data - fall back to greedy
+            # No data - fall back to greedy, but check if we have insights
+            if insights_by_category:
+                if verbose:
+                    print("No benchmark data, but have training insights - using insight-guided compose")
+                return self._insight_guided_compose(insights_by_category, optimize_for, max_components, verbose, reasoning)
             if verbose:
                 print("No benchmark data available, using greedy strategy")
             reasoning["design_choices"].append("Fallback to greedy (no benchmark data)")
@@ -746,6 +761,132 @@ class EngineComposer:
         """Wrapper for results_aware_compose to return just components for dream()."""
         components, _reasoning = self.results_aware_compose(**kwargs)
         return components
+
+    def _insight_guided_compose(
+        self,
+        insights_by_category: dict,
+        optimize_for: str,
+        max_components: int,
+        verbose: bool,
+        reasoning: dict
+    ) -> tuple[list['Component'], dict]:
+        """
+        Compose architecture guided purely by training insights when no benchmark data available.
+
+        Parses insight titles for model/attention type recommendations and uses those
+        to guide component selection.
+        """
+        all_components = self.db.find_components()
+        if not all_components:
+            return [], reasoning
+
+        # Parse insights for recommendations
+        preferred_models = set()
+        avoid_models = set()
+
+        for cat, cat_insights in insights_by_category.items():
+            for ins in cat_insights:
+                title = ins.get('title', '').lower()
+                desc = ins.get('description', '').lower()
+
+                # Look for "X beats Y" or "X better than Y" patterns
+                if 'beats' in title or 'better' in title or '>' in title:
+                    # The model before "beats" is good
+                    for model in ['mha', 'gqa', 'mqa', 'mamba', 'ssm', 'hybrid', 'attnfirst']:
+                        if model in title.split('beats')[0] if 'beats' in title else title.split('>')[0]:
+                            preferred_models.add(model)
+                        # The model after "beats" is worse (but not necessarily bad)
+                        if 'beats' in title and model in title.split('beats')[1]:
+                            avoid_models.add(model)
+
+                # Look for speed insights for efficiency optimization
+                if optimize_for == "speed" and ('faster' in title or 'speed' in title):
+                    for model in ['mamba', 'ssm', 'mqa', 'gqa']:
+                        if model in title or model in desc:
+                            preferred_models.add(model)
+
+        if verbose:
+            print(f"Insight-guided preferences: {preferred_models}")
+            if avoid_models - preferred_models:
+                print(f"Potentially avoid: {avoid_models - preferred_models}")
+
+        reasoning["design_choices"].append(f"Insight-guided: prefer {preferred_models}")
+
+        # Start building the architecture
+        engine = []
+        used_ids = set()
+        used_categories = set()
+
+        # 1. Start with position/embedding
+        start_comps = [c for c in all_components if _is_start_component(c)]
+        if start_comps:
+            best_start = max(start_comps, key=lambda c: c.usefulness_score)
+            engine.append(best_start)
+            used_ids.add(best_start.component_id)
+            used_categories.add(get_component_category(best_start))
+            reasoning["design_choices"].append(f"Start: {best_start.name}")
+
+        # 2. Add attention based on insights
+        attn_comps = [c for c in all_components if get_component_category(c) == "attention"]
+
+        # Score attention components by insight preference
+        scored_attn = []
+        for comp in attn_comps:
+            if comp.component_id in used_ids:
+                continue
+            score = comp.usefulness_score
+            name_lower = comp.name.lower()
+            # Boost if matches preferred model
+            for pref in preferred_models:
+                if pref in name_lower:
+                    score += 0.3
+                    break
+            # Slight penalty if in avoid list (but not preferred)
+            for avoid in (avoid_models - preferred_models):
+                if avoid in name_lower:
+                    score -= 0.1
+                    break
+            scored_attn.append((comp, score))
+
+        if scored_attn:
+            scored_attn.sort(key=lambda x: x[1], reverse=True)
+            best_attn = scored_attn[0][0]
+            engine.append(best_attn)
+            used_ids.add(best_attn.component_id)
+            used_categories.add("attention")
+            reasoning["design_choices"].append(f"Attention: {best_attn.name} (insight-guided)")
+
+        # 3. Fill in remaining categories
+        remaining_cats = ["layer", "structure", "efficiency", "output"]
+        for cat in remaining_cats:
+            if len(engine) >= max_components:
+                break
+            if cat in used_categories:
+                continue
+
+            cat_comps = [
+                c for c in all_components
+                if get_component_category(c) == cat
+                and c.component_id not in used_ids
+            ]
+            if cat_comps:
+                best = max(cat_comps, key=lambda c: c.usefulness_score)
+                engine.append(best)
+                used_ids.add(best.component_id)
+                used_categories.add(cat)
+
+        # Sort by architecture order
+        engine = self.sort_by_architecture_order(engine)
+
+        if verbose:
+            print(f"\nInsight-guided architecture ({len(engine)} components):")
+            for i, comp in enumerate(engine, 1):
+                print(f"  {i}. {comp.name} ({get_component_category(comp)})")
+            print()
+            for choice in reasoning["design_choices"]:
+                print(f"  -> {choice}")
+
+        return engine, reasoning
 
     def _get_configuration_bonus(self, components: list[Component]) -> float:
         """
