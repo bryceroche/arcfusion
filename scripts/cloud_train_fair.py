@@ -869,6 +869,151 @@ class Transformer_MambaHeavy(nn.Module):
             x = block(x)
         return self.head(self.ln_f(x))
 ''',
+
+    # Attention-FIRST Hybrid (global context early, SSM refinement)
+    "Transformer_AttnFirst": '''
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+# ============ MHA Block ============
+class MHA(nn.Module):
+    """Standard Multi-Head Attention with causal masking"""
+    def __init__(self, d_model, n_heads, dropout=0.1):
+        super().__init__()
+        self.n_heads = n_heads
+        self.head_dim = d_model // n_heads
+        self.scale = self.head_dim ** -0.5
+        self.qkv = nn.Linear(d_model, 3 * d_model)
+        self.out = nn.Linear(d_model, d_model)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        B, N, C = x.shape
+        qkv = self.qkv(x).reshape(B, N, 3, self.n_heads, self.head_dim).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv[0], qkv[1], qkv[2]
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+        mask = torch.triu(torch.ones(N, N, device=x.device), diagonal=1).bool()
+        attn = attn.masked_fill(mask, float('-inf'))
+        attn = F.softmax(attn, dim=-1)
+        attn = self.dropout(attn)
+        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
+        return self.out(x)
+
+class MHABlock(nn.Module):
+    def __init__(self, d_model, n_heads):
+        super().__init__()
+        self.ln1 = nn.LayerNorm(d_model)
+        self.attn = MHA(d_model, n_heads)
+        self.ln2 = nn.LayerNorm(d_model)
+        self.ffn = nn.Sequential(
+            nn.Linear(d_model, d_model * 4), nn.GELU(),
+            nn.Linear(d_model * 4, d_model), nn.Dropout(0.1),
+        )
+
+    def forward(self, x):
+        x = x + self.attn(self.ln1(x))
+        x = x + self.ffn(self.ln2(x))
+        return x
+
+# ============ SSM Block ============
+class SelectiveSSM(nn.Module):
+    """Simplified Selective State Space Model (Mamba-style)."""
+    def __init__(self, d_model, d_state=16, d_conv=4, expand=2, dropout=0.1):
+        super().__init__()
+        self.d_model = d_model
+        self.d_state = d_state
+        self.d_inner = int(expand * d_model)
+        self.in_proj = nn.Linear(d_model, self.d_inner * 2, bias=False)
+        self.conv1d = nn.Conv1d(self.d_inner, self.d_inner, kernel_size=d_conv,
+                                padding=d_conv - 1, groups=self.d_inner, bias=True)
+        self.x_proj = nn.Linear(self.d_inner, d_state * 2 + 1, bias=False)
+        self.dt_proj = nn.Linear(1, self.d_inner, bias=True)
+        self.A = nn.Parameter(torch.randn(self.d_inner, d_state))
+        self.D = nn.Parameter(torch.ones(self.d_inner))
+        self.out_proj = nn.Linear(self.d_inner, d_model, bias=False)
+        self.dropout = nn.Dropout(dropout)
+        with torch.no_grad():
+            self.A.copy_(-torch.exp(torch.linspace(0, 4, d_state)).unsqueeze(0).expand(self.d_inner, -1))
+
+    def forward(self, x):
+        B, L, D = x.shape
+        xz = self.in_proj(x)
+        x_main, z = xz.chunk(2, dim=-1)
+        x_conv = x_main.transpose(1, 2)
+        x_conv = self.conv1d(x_conv)[:, :, :L]
+        x_conv = x_conv.transpose(1, 2)
+        x_conv = F.silu(x_conv)
+        x_ssm = self.x_proj(x_conv)
+        dt, B_input, C = x_ssm[:, :, :1], x_ssm[:, :, 1:self.d_state+1], x_ssm[:, :, self.d_state+1:]
+        dt = F.softplus(self.dt_proj(dt))
+        A = self.A
+        h = torch.zeros(B, self.d_inner, self.d_state, device=x.device, dtype=x.dtype)
+        outputs = []
+        for t in range(L):
+            dt_t, B_t, C_t, x_t = dt[:, t, :], B_input[:, t, :], C[:, t, :], x_conv[:, t, :]
+            A_bar = torch.exp(dt_t.unsqueeze(-1) * A.unsqueeze(0))
+            B_bar = dt_t.unsqueeze(-1) * B_t.unsqueeze(1)
+            h = A_bar * h + B_bar * x_t.unsqueeze(-1)
+            y_t = (h * C_t.unsqueeze(1)).sum(-1) + self.D * x_t
+            outputs.append(y_t)
+        y = torch.stack(outputs, dim=1)
+        y = y * F.silu(z)
+        return self.dropout(self.out_proj(y))
+
+class MambaBlock(nn.Module):
+    def __init__(self, d_model, d_state=16):
+        super().__init__()
+        self.ln1 = nn.LayerNorm(d_model)
+        self.ssm = SelectiveSSM(d_model, d_state=d_state)
+        self.ln2 = nn.LayerNorm(d_model)
+        self.ffn = nn.Sequential(
+            nn.Linear(d_model, d_model * 4), nn.GELU(),
+            nn.Linear(d_model * 4, d_model), nn.Dropout(0.1),
+        )
+
+    def forward(self, x):
+        x = x + self.ssm(self.ln1(x))
+        x = x + self.ffn(self.ln2(x))
+        return x
+
+# ============ Attention-FIRST Hybrid Model ============
+class Transformer_AttnFirst(nn.Module):
+    """Attention-FIRST Hybrid: Global context early, SSM refinement.
+
+    Architecture for 4 layers: [MHA, Mamba, Mamba, Mamba]
+    - First layer is attention for global context capture
+    - Remaining layers are Mamba for efficient sequential refinement
+
+    Hypothesis: Providing global context FIRST allows Mamba layers
+    to refine with full sequence awareness, potentially better than
+    attention-at-end where Mamba has no global context to work with.
+    """
+    def __init__(self, d_model=256, vocab_size=8000, n_layers=4, n_heads=8):
+        super().__init__()
+        d_state = max(16, d_model // 16)
+        self.embed = nn.Embedding(vocab_size, d_model)
+        self.pos = nn.Embedding(5000, d_model)  # Position embedding for attention
+
+        # Build attention-first stack: MHA first, then Mamba
+        # For 4 layers: [MHA, Mamba, Mamba, Mamba]
+        blocks = []
+        for i in range(n_layers):
+            if i == 0:  # First layer gets attention
+                blocks.append(MHABlock(d_model, n_heads))
+            else:
+                blocks.append(MambaBlock(d_model, d_state))
+        self.blocks = nn.ModuleList(blocks)
+        self.ln_f = nn.LayerNorm(d_model)
+        self.head = nn.Linear(d_model, vocab_size)
+
+    def forward(self, x):
+        B, T = x.shape
+        x = self.embed(x) + self.pos(torch.arange(T, device=x.device))
+        for block in self.blocks:
+            x = block(x)
+        return self.head(self.ln_f(x))
+''',
 }
 
 
