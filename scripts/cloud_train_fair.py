@@ -1014,6 +1014,1426 @@ class Transformer_AttnFirst(nn.Module):
             x = block(x)
         return self.head(self.ln_f(x))
 ''',
+
+    # Mamba 4:1 Hybrid (4 SSM : 1 MHA ratio, 5 layers total)
+    "Transformer_Mamba4to1": '''
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+# ============ MHA Block ============
+class MHA(nn.Module):
+    """Standard Multi-Head Attention with causal masking"""
+    def __init__(self, d_model, n_heads, dropout=0.1):
+        super().__init__()
+        self.n_heads = n_heads
+        self.head_dim = d_model // n_heads
+        self.scale = self.head_dim ** -0.5
+        self.qkv = nn.Linear(d_model, 3 * d_model)
+        self.out = nn.Linear(d_model, d_model)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        B, N, C = x.shape
+        qkv = self.qkv(x).reshape(B, N, 3, self.n_heads, self.head_dim).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv[0], qkv[1], qkv[2]
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+        mask = torch.triu(torch.ones(N, N, device=x.device), diagonal=1).bool()
+        attn = attn.masked_fill(mask, float('-inf'))
+        attn = F.softmax(attn, dim=-1)
+        attn = self.dropout(attn)
+        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
+        return self.out(x)
+
+class MHABlock(nn.Module):
+    def __init__(self, d_model, n_heads):
+        super().__init__()
+        self.ln1 = nn.LayerNorm(d_model)
+        self.attn = MHA(d_model, n_heads)
+        self.ln2 = nn.LayerNorm(d_model)
+        self.ffn = nn.Sequential(
+            nn.Linear(d_model, d_model * 4), nn.GELU(),
+            nn.Linear(d_model * 4, d_model), nn.Dropout(0.1),
+        )
+
+    def forward(self, x):
+        x = x + self.attn(self.ln1(x))
+        x = x + self.ffn(self.ln2(x))
+        return x
+
+# ============ SSM Block ============
+class SelectiveSSM(nn.Module):
+    """Simplified Selective State Space Model (Mamba-style)."""
+    def __init__(self, d_model, d_state=16, d_conv=4, expand=2, dropout=0.1):
+        super().__init__()
+        self.d_model = d_model
+        self.d_state = d_state
+        self.d_inner = int(expand * d_model)
+        self.in_proj = nn.Linear(d_model, self.d_inner * 2, bias=False)
+        self.conv1d = nn.Conv1d(self.d_inner, self.d_inner, kernel_size=d_conv,
+                                padding=d_conv - 1, groups=self.d_inner, bias=True)
+        self.x_proj = nn.Linear(self.d_inner, d_state * 2 + 1, bias=False)
+        self.dt_proj = nn.Linear(1, self.d_inner, bias=True)
+        self.A = nn.Parameter(torch.randn(self.d_inner, d_state))
+        self.D = nn.Parameter(torch.ones(self.d_inner))
+        self.out_proj = nn.Linear(self.d_inner, d_model, bias=False)
+        self.dropout = nn.Dropout(dropout)
+        with torch.no_grad():
+            self.A.copy_(-torch.exp(torch.linspace(0, 4, d_state)).unsqueeze(0).expand(self.d_inner, -1))
+
+    def forward(self, x):
+        B, L, D = x.shape
+        xz = self.in_proj(x)
+        x_main, z = xz.chunk(2, dim=-1)
+        x_conv = x_main.transpose(1, 2)
+        x_conv = self.conv1d(x_conv)[:, :, :L]
+        x_conv = x_conv.transpose(1, 2)
+        x_conv = F.silu(x_conv)
+        x_ssm = self.x_proj(x_conv)
+        dt, B_input, C = x_ssm[:, :, :1], x_ssm[:, :, 1:self.d_state+1], x_ssm[:, :, self.d_state+1:]
+        dt = F.softplus(self.dt_proj(dt))
+        A = self.A
+        h = torch.zeros(B, self.d_inner, self.d_state, device=x.device, dtype=x.dtype)
+        outputs = []
+        for t in range(L):
+            dt_t, B_t, C_t, x_t = dt[:, t, :], B_input[:, t, :], C[:, t, :], x_conv[:, t, :]
+            A_bar = torch.exp(dt_t.unsqueeze(-1) * A.unsqueeze(0))
+            B_bar = dt_t.unsqueeze(-1) * B_t.unsqueeze(1)
+            h = A_bar * h + B_bar * x_t.unsqueeze(-1)
+            y_t = (h * C_t.unsqueeze(1)).sum(-1) + self.D * x_t
+            outputs.append(y_t)
+        y = torch.stack(outputs, dim=1)
+        y = y * F.silu(z)
+        return self.dropout(self.out_proj(y))
+
+class MambaBlock(nn.Module):
+    def __init__(self, d_model, d_state=16):
+        super().__init__()
+        self.ln1 = nn.LayerNorm(d_model)
+        self.ssm = SelectiveSSM(d_model, d_state=d_state)
+        self.ln2 = nn.LayerNorm(d_model)
+        self.ffn = nn.Sequential(
+            nn.Linear(d_model, d_model * 4), nn.GELU(),
+            nn.Linear(d_model * 4, d_model), nn.Dropout(0.1),
+        )
+
+    def forward(self, x):
+        x = x + self.ssm(self.ln1(x))
+        x = x + self.ffn(self.ln2(x))
+        return x
+
+# ============ Mamba 4:1 Hybrid Model ============
+class Transformer_Mamba4to1(nn.Module):
+    """Mamba 4:1 Hybrid: 4 SSM layers + 1 MHA layer = 5 layers total.
+
+    Architecture: [Mamba, Mamba, Mamba, Mamba, MHA]
+    - 4 Mamba layers for efficient O(n) sequential processing
+    - 1 attention layer at the end for final global reasoning
+
+    Testing hypothesis: Can we push the Mamba ratio even higher?
+    Compared to MambaHeavy (3:1), this has one more Mamba layer.
+    """
+    def __init__(self, d_model=256, vocab_size=8000, n_layers=4, n_heads=8):
+        super().__init__()
+        d_state = max(16, d_model // 16)
+        self.embed = nn.Embedding(vocab_size, d_model)
+        self.pos = nn.Embedding(5000, d_model)
+
+        # Build 4:1 stack: 4 Mamba + 1 MHA (ignores n_layers, always 5)
+        blocks = []
+        for i in range(4):  # 4 Mamba blocks
+            blocks.append(MambaBlock(d_model, d_state))
+        blocks.append(MHABlock(d_model, n_heads))  # 1 MHA at end
+        self.blocks = nn.ModuleList(blocks)
+        self.ln_f = nn.LayerNorm(d_model)
+        self.head = nn.Linear(d_model, vocab_size)
+
+    def forward(self, x):
+        B, T = x.shape
+        x = self.embed(x) + self.pos(torch.arange(T, device=x.device))
+        for block in self.blocks:
+            x = block(x)
+        return self.head(self.ln_f(x))
+''',
+
+    # Linear Attention Hybrid (O(n) attention instead of O(n²))
+    "Transformer_LinearAttn": '''
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+# ============ Linear Attention ============
+class LinearAttention(nn.Module):
+    """Linear Attention: O(n) complexity via kernel trick.
+
+    Instead of softmax(QK^T)V which is O(n²), we use:
+    (φ(Q) @ φ(K)^T) @ V = φ(Q) @ (φ(K)^T @ V)
+
+    where φ is a feature map (here: elu(x) + 1).
+    This allows computing in O(n*d²) which is O(n) for fixed d.
+
+    Based on "Transformers are RNNs" (Katharopoulos et al., 2020)
+    """
+    def __init__(self, d_model, n_heads, dropout=0.1):
+        super().__init__()
+        self.n_heads = n_heads
+        self.head_dim = d_model // n_heads
+        self.scale = self.head_dim ** -0.5
+        self.qkv = nn.Linear(d_model, 3 * d_model)
+        self.out = nn.Linear(d_model, d_model)
+        self.dropout = nn.Dropout(dropout)
+
+    def feature_map(self, x):
+        """ELU-based feature map: elu(x) + 1 to ensure positivity."""
+        return F.elu(x) + 1
+
+    def forward(self, x):
+        B, N, C = x.shape
+        qkv = self.qkv(x).reshape(B, N, 3, self.n_heads, self.head_dim).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv[0], qkv[1], qkv[2]  # B, H, N, D
+
+        # Apply feature map
+        q = self.feature_map(q)
+        k = self.feature_map(k)
+
+        # Causal linear attention via cumulative sum
+        # For each position i, we can only attend to positions <= i
+        # We compute this efficiently using cumulative KV states
+
+        # Compute KV: (B, H, D, D) cumulative state
+        kv = torch.zeros(B, self.n_heads, self.head_dim, self.head_dim, device=x.device, dtype=x.dtype)
+        k_sum = torch.zeros(B, self.n_heads, self.head_dim, device=x.device, dtype=x.dtype)
+
+        outputs = []
+        for t in range(N):
+            k_t = k[:, :, t, :]  # B, H, D
+            v_t = v[:, :, t, :]  # B, H, D
+            q_t = q[:, :, t, :]  # B, H, D
+
+            # Update cumulative state
+            kv = kv + torch.einsum('bhd,bhe->bhde', k_t, v_t)
+            k_sum = k_sum + k_t
+
+            # Compute attention output: q @ kv / (q @ k_sum)
+            num = torch.einsum('bhd,bhde->bhe', q_t, kv)
+            denom = torch.einsum('bhd,bhd->bh', q_t, k_sum).unsqueeze(-1) + 1e-6
+            out_t = num / denom
+            outputs.append(out_t)
+
+        out = torch.stack(outputs, dim=2)  # B, H, N, D
+        out = out.transpose(1, 2).reshape(B, N, C)
+        return self.dropout(self.out(out))
+
+
+class LinearAttnBlock(nn.Module):
+    def __init__(self, d_model, n_heads):
+        super().__init__()
+        self.ln1 = nn.LayerNorm(d_model)
+        self.attn = LinearAttention(d_model, n_heads)
+        self.ln2 = nn.LayerNorm(d_model)
+        self.ffn = nn.Sequential(
+            nn.Linear(d_model, d_model * 4), nn.GELU(),
+            nn.Linear(d_model * 4, d_model), nn.Dropout(0.1),
+        )
+
+    def forward(self, x):
+        x = x + self.attn(self.ln1(x))
+        x = x + self.ffn(self.ln2(x))
+        return x
+
+# ============ SSM Block ============
+class SelectiveSSM(nn.Module):
+    """Simplified Selective State Space Model (Mamba-style)."""
+    def __init__(self, d_model, d_state=16, d_conv=4, expand=2, dropout=0.1):
+        super().__init__()
+        self.d_model = d_model
+        self.d_state = d_state
+        self.d_inner = int(expand * d_model)
+        self.in_proj = nn.Linear(d_model, self.d_inner * 2, bias=False)
+        self.conv1d = nn.Conv1d(self.d_inner, self.d_inner, kernel_size=d_conv,
+                                padding=d_conv - 1, groups=self.d_inner, bias=True)
+        self.x_proj = nn.Linear(self.d_inner, d_state * 2 + 1, bias=False)
+        self.dt_proj = nn.Linear(1, self.d_inner, bias=True)
+        self.A = nn.Parameter(torch.randn(self.d_inner, d_state))
+        self.D = nn.Parameter(torch.ones(self.d_inner))
+        self.out_proj = nn.Linear(self.d_inner, d_model, bias=False)
+        self.dropout = nn.Dropout(dropout)
+        with torch.no_grad():
+            self.A.copy_(-torch.exp(torch.linspace(0, 4, d_state)).unsqueeze(0).expand(self.d_inner, -1))
+
+    def forward(self, x):
+        B, L, D = x.shape
+        xz = self.in_proj(x)
+        x_main, z = xz.chunk(2, dim=-1)
+        x_conv = x_main.transpose(1, 2)
+        x_conv = self.conv1d(x_conv)[:, :, :L]
+        x_conv = x_conv.transpose(1, 2)
+        x_conv = F.silu(x_conv)
+        x_ssm = self.x_proj(x_conv)
+        dt, B_input, C = x_ssm[:, :, :1], x_ssm[:, :, 1:self.d_state+1], x_ssm[:, :, self.d_state+1:]
+        dt = F.softplus(self.dt_proj(dt))
+        A = self.A
+        h = torch.zeros(B, self.d_inner, self.d_state, device=x.device, dtype=x.dtype)
+        outputs = []
+        for t in range(L):
+            dt_t, B_t, C_t, x_t = dt[:, t, :], B_input[:, t, :], C[:, t, :], x_conv[:, t, :]
+            A_bar = torch.exp(dt_t.unsqueeze(-1) * A.unsqueeze(0))
+            B_bar = dt_t.unsqueeze(-1) * B_t.unsqueeze(1)
+            h = A_bar * h + B_bar * x_t.unsqueeze(-1)
+            y_t = (h * C_t.unsqueeze(1)).sum(-1) + self.D * x_t
+            outputs.append(y_t)
+        y = torch.stack(outputs, dim=1)
+        y = y * F.silu(z)
+        return self.dropout(self.out_proj(y))
+
+class MambaBlock(nn.Module):
+    def __init__(self, d_model, d_state=16):
+        super().__init__()
+        self.ln1 = nn.LayerNorm(d_model)
+        self.ssm = SelectiveSSM(d_model, d_state=d_state)
+        self.ln2 = nn.LayerNorm(d_model)
+        self.ffn = nn.Sequential(
+            nn.Linear(d_model, d_model * 4), nn.GELU(),
+            nn.Linear(d_model * 4, d_model), nn.Dropout(0.1),
+        )
+
+    def forward(self, x):
+        x = x + self.ssm(self.ln1(x))
+        x = x + self.ffn(self.ln2(x))
+        return x
+
+# ============ Linear Attention Hybrid Model ============
+class Transformer_LinearAttn(nn.Module):
+    """Linear Attention Hybrid: Mamba + Linear Attention (all O(n)).
+
+    Architecture for 4 layers: [Mamba, Mamba, LinearAttn, Mamba]
+    - SSM layers: O(n) sequential processing
+    - Linear attention: O(n) global context (instead of O(n²) softmax attention)
+
+    Testing hypothesis: Can linear attention provide similar benefits to
+    standard attention while maintaining O(n) complexity throughout?
+    """
+    def __init__(self, d_model=256, vocab_size=8000, n_layers=4, n_heads=8):
+        super().__init__()
+        d_state = max(16, d_model // 16)
+        self.embed = nn.Embedding(vocab_size, d_model)
+        self.pos = nn.Embedding(5000, d_model)
+
+        # Build hybrid stack: linear attention every 3rd layer (like Hybrid)
+        blocks = []
+        for i in range(n_layers):
+            if (i + 1) % 3 == 0:  # Layer 3, 6, 9... get linear attention
+                blocks.append(LinearAttnBlock(d_model, n_heads))
+            else:
+                blocks.append(MambaBlock(d_model, d_state))
+        self.blocks = nn.ModuleList(blocks)
+        self.ln_f = nn.LayerNorm(d_model)
+        self.head = nn.Linear(d_model, vocab_size)
+
+    def forward(self, x):
+        B, T = x.shape
+        x = self.embed(x) + self.pos(torch.arange(T, device=x.device))
+        for block in self.blocks:
+            x = block(x)
+        return self.head(self.ln_f(x))
+''',
+
+    # GQA-Mamba Hybrid (fast GQA + quality SSM)
+    "Transformer_GQAMamba": '''
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+# ============ GQA Block ============
+class GQA(nn.Module):
+    """Grouped Query Attention - fewer KV heads for speed"""
+    def __init__(self, d_model, n_heads, n_kv_heads=2, dropout=0.1):
+        super().__init__()
+        self.n_heads = n_heads
+        self.n_kv_heads = n_kv_heads
+        self.head_dim = d_model // n_heads
+        self.scale = self.head_dim ** -0.5
+        self.q_proj = nn.Linear(d_model, d_model)
+        self.k_proj = nn.Linear(d_model, n_kv_heads * self.head_dim)
+        self.v_proj = nn.Linear(d_model, n_kv_heads * self.head_dim)
+        self.out = nn.Linear(d_model, d_model)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        B, N, C = x.shape
+        q = self.q_proj(x).reshape(B, N, self.n_heads, self.head_dim).transpose(1, 2)
+        k = self.k_proj(x).reshape(B, N, self.n_kv_heads, self.head_dim).transpose(1, 2)
+        v = self.v_proj(x).reshape(B, N, self.n_kv_heads, self.head_dim).transpose(1, 2)
+        n_rep = self.n_heads // self.n_kv_heads
+        k = k.repeat_interleave(n_rep, dim=1)
+        v = v.repeat_interleave(n_rep, dim=1)
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+        mask = torch.triu(torch.ones(N, N, device=x.device), diagonal=1).bool()
+        attn = attn.masked_fill(mask, float('-inf'))
+        attn = F.softmax(attn, dim=-1)
+        attn = self.dropout(attn)
+        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
+        return self.out(x)
+
+class GQABlock(nn.Module):
+    def __init__(self, d_model, n_heads):
+        super().__init__()
+        self.ln1 = nn.LayerNorm(d_model)
+        self.attn = GQA(d_model, n_heads, n_kv_heads=2)
+        self.ln2 = nn.LayerNorm(d_model)
+        self.ffn = nn.Sequential(
+            nn.Linear(d_model, d_model * 4), nn.GELU(),
+            nn.Linear(d_model * 4, d_model), nn.Dropout(0.1),
+        )
+
+    def forward(self, x):
+        x = x + self.attn(self.ln1(x))
+        x = x + self.ffn(self.ln2(x))
+        return x
+
+# ============ SSM Block ============
+class SelectiveSSM(nn.Module):
+    def __init__(self, d_model, d_state=16, d_conv=4, expand=2, dropout=0.1):
+        super().__init__()
+        self.d_model = d_model
+        self.d_state = d_state
+        self.d_inner = int(expand * d_model)
+        self.in_proj = nn.Linear(d_model, self.d_inner * 2, bias=False)
+        self.conv1d = nn.Conv1d(self.d_inner, self.d_inner, kernel_size=d_conv,
+                                padding=d_conv - 1, groups=self.d_inner, bias=True)
+        self.x_proj = nn.Linear(self.d_inner, d_state * 2 + 1, bias=False)
+        self.dt_proj = nn.Linear(1, self.d_inner, bias=True)
+        self.A = nn.Parameter(torch.randn(self.d_inner, d_state))
+        self.D = nn.Parameter(torch.ones(self.d_inner))
+        self.out_proj = nn.Linear(self.d_inner, d_model, bias=False)
+        self.dropout = nn.Dropout(dropout)
+        with torch.no_grad():
+            self.A.copy_(-torch.exp(torch.linspace(0, 4, d_state)).unsqueeze(0).expand(self.d_inner, -1))
+
+    def forward(self, x):
+        B, L, D = x.shape
+        xz = self.in_proj(x)
+        x_main, z = xz.chunk(2, dim=-1)
+        x_conv = self.conv1d(x_main.transpose(1, 2))[:, :, :L].transpose(1, 2)
+        x_conv = F.silu(x_conv)
+        x_ssm = self.x_proj(x_conv)
+        dt, B_input, C = x_ssm[:, :, :1], x_ssm[:, :, 1:self.d_state+1], x_ssm[:, :, self.d_state+1:]
+        dt = F.softplus(self.dt_proj(dt))
+        A = self.A
+        h = torch.zeros(B, self.d_inner, self.d_state, device=x.device, dtype=x.dtype)
+        outputs = []
+        for t in range(L):
+            dt_t, B_t, C_t, x_t = dt[:, t, :], B_input[:, t, :], C[:, t, :], x_conv[:, t, :]
+            A_bar = torch.exp(dt_t.unsqueeze(-1) * A.unsqueeze(0))
+            B_bar = dt_t.unsqueeze(-1) * B_t.unsqueeze(1)
+            h = A_bar * h + B_bar * x_t.unsqueeze(-1)
+            y_t = (h * C_t.unsqueeze(1)).sum(-1) + self.D * x_t
+            outputs.append(y_t)
+        y = torch.stack(outputs, dim=1)
+        y = y * F.silu(z)
+        return self.dropout(self.out_proj(y))
+
+class MambaBlock(nn.Module):
+    def __init__(self, d_model, d_state=16):
+        super().__init__()
+        self.ln1 = nn.LayerNorm(d_model)
+        self.ssm = SelectiveSSM(d_model, d_state=d_state)
+        self.ln2 = nn.LayerNorm(d_model)
+        self.ffn = nn.Sequential(
+            nn.Linear(d_model, d_model * 4), nn.GELU(),
+            nn.Linear(d_model * 4, d_model), nn.Dropout(0.1),
+        )
+
+    def forward(self, x):
+        x = x + self.ssm(self.ln1(x))
+        x = x + self.ffn(self.ln2(x))
+        return x
+
+class Transformer_GQAMamba(nn.Module):
+    """GQA-Mamba Hybrid: Fast GQA attention + quality SSM.
+
+    Architecture: [GQA, Mamba, GQA, Mamba]
+    - GQA: ~3.5x faster than MHA (fewer KV heads)
+    - Mamba: Quality boost from SSM
+    - Alternating pattern for balanced processing
+
+    Hypothesis: Get close to MHA baseline speed while keeping quality gains.
+    """
+    def __init__(self, d_model=256, vocab_size=8000, n_layers=4, n_heads=8):
+        super().__init__()
+        d_state = max(16, d_model // 16)
+        self.embed = nn.Embedding(vocab_size, d_model)
+        self.pos = nn.Embedding(5000, d_model)
+        # [GQA, Mamba, GQA, Mamba]
+        self.blocks = nn.ModuleList([
+            GQABlock(d_model, n_heads),
+            MambaBlock(d_model, d_state),
+            GQABlock(d_model, n_heads),
+            MambaBlock(d_model, d_state),
+        ])
+        self.ln_f = nn.LayerNorm(d_model)
+        self.head = nn.Linear(d_model, vocab_size)
+
+    def forward(self, x):
+        B, T = x.shape
+        x = self.embed(x) + self.pos(torch.arange(T, device=x.device))
+        for block in self.blocks:
+            x = block(x)
+        return self.head(self.ln_f(x))
+''',
+
+    # Sandwich Architecture (attention bookends)
+    "Transformer_Sandwich": '''
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+# ============ MHA Block ============
+class MHA(nn.Module):
+    def __init__(self, d_model, n_heads, dropout=0.1):
+        super().__init__()
+        self.n_heads = n_heads
+        self.head_dim = d_model // n_heads
+        self.scale = self.head_dim ** -0.5
+        self.qkv = nn.Linear(d_model, 3 * d_model)
+        self.out = nn.Linear(d_model, d_model)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        B, N, C = x.shape
+        qkv = self.qkv(x).reshape(B, N, 3, self.n_heads, self.head_dim).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv[0], qkv[1], qkv[2]
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+        mask = torch.triu(torch.ones(N, N, device=x.device), diagonal=1).bool()
+        attn = attn.masked_fill(mask, float('-inf'))
+        attn = F.softmax(attn, dim=-1)
+        attn = self.dropout(attn)
+        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
+        return self.out(x)
+
+class MHABlock(nn.Module):
+    def __init__(self, d_model, n_heads):
+        super().__init__()
+        self.ln1 = nn.LayerNorm(d_model)
+        self.attn = MHA(d_model, n_heads)
+        self.ln2 = nn.LayerNorm(d_model)
+        self.ffn = nn.Sequential(
+            nn.Linear(d_model, d_model * 4), nn.GELU(),
+            nn.Linear(d_model * 4, d_model), nn.Dropout(0.1),
+        )
+
+    def forward(self, x):
+        x = x + self.attn(self.ln1(x))
+        x = x + self.ffn(self.ln2(x))
+        return x
+
+# ============ SSM Block ============
+class SelectiveSSM(nn.Module):
+    def __init__(self, d_model, d_state=16, d_conv=4, expand=2, dropout=0.1):
+        super().__init__()
+        self.d_model = d_model
+        self.d_state = d_state
+        self.d_inner = int(expand * d_model)
+        self.in_proj = nn.Linear(d_model, self.d_inner * 2, bias=False)
+        self.conv1d = nn.Conv1d(self.d_inner, self.d_inner, kernel_size=d_conv,
+                                padding=d_conv - 1, groups=self.d_inner, bias=True)
+        self.x_proj = nn.Linear(self.d_inner, d_state * 2 + 1, bias=False)
+        self.dt_proj = nn.Linear(1, self.d_inner, bias=True)
+        self.A = nn.Parameter(torch.randn(self.d_inner, d_state))
+        self.D = nn.Parameter(torch.ones(self.d_inner))
+        self.out_proj = nn.Linear(self.d_inner, d_model, bias=False)
+        self.dropout = nn.Dropout(dropout)
+        with torch.no_grad():
+            self.A.copy_(-torch.exp(torch.linspace(0, 4, d_state)).unsqueeze(0).expand(self.d_inner, -1))
+
+    def forward(self, x):
+        B, L, D = x.shape
+        xz = self.in_proj(x)
+        x_main, z = xz.chunk(2, dim=-1)
+        x_conv = self.conv1d(x_main.transpose(1, 2))[:, :, :L].transpose(1, 2)
+        x_conv = F.silu(x_conv)
+        x_ssm = self.x_proj(x_conv)
+        dt, B_input, C = x_ssm[:, :, :1], x_ssm[:, :, 1:self.d_state+1], x_ssm[:, :, self.d_state+1:]
+        dt = F.softplus(self.dt_proj(dt))
+        A = self.A
+        h = torch.zeros(B, self.d_inner, self.d_state, device=x.device, dtype=x.dtype)
+        outputs = []
+        for t in range(L):
+            dt_t, B_t, C_t, x_t = dt[:, t, :], B_input[:, t, :], C[:, t, :], x_conv[:, t, :]
+            A_bar = torch.exp(dt_t.unsqueeze(-1) * A.unsqueeze(0))
+            B_bar = dt_t.unsqueeze(-1) * B_t.unsqueeze(1)
+            h = A_bar * h + B_bar * x_t.unsqueeze(-1)
+            y_t = (h * C_t.unsqueeze(1)).sum(-1) + self.D * x_t
+            outputs.append(y_t)
+        y = torch.stack(outputs, dim=1)
+        y = y * F.silu(z)
+        return self.dropout(self.out_proj(y))
+
+class MambaBlock(nn.Module):
+    def __init__(self, d_model, d_state=16):
+        super().__init__()
+        self.ln1 = nn.LayerNorm(d_model)
+        self.ssm = SelectiveSSM(d_model, d_state=d_state)
+        self.ln2 = nn.LayerNorm(d_model)
+        self.ffn = nn.Sequential(
+            nn.Linear(d_model, d_model * 4), nn.GELU(),
+            nn.Linear(d_model * 4, d_model), nn.Dropout(0.1),
+        )
+
+    def forward(self, x):
+        x = x + self.ssm(self.ln1(x))
+        x = x + self.ffn(self.ln2(x))
+        return x
+
+class Transformer_Sandwich(nn.Module):
+    """Sandwich Architecture: Attention bookends with SSM filling.
+
+    Architecture: [MHA, Mamba, Mamba, MHA]
+    - First MHA: Establish global context
+    - Middle Mamba layers: Efficient sequential processing
+    - Final MHA: Global cleanup/refinement
+
+    Hypothesis: Bookending with attention gives best of both worlds -
+    global context at start AND end, with efficient SSM in middle.
+    """
+    def __init__(self, d_model=256, vocab_size=8000, n_layers=4, n_heads=8):
+        super().__init__()
+        d_state = max(16, d_model // 16)
+        self.embed = nn.Embedding(vocab_size, d_model)
+        self.pos = nn.Embedding(5000, d_model)
+        # [MHA, Mamba, Mamba, MHA]
+        self.blocks = nn.ModuleList([
+            MHABlock(d_model, n_heads),
+            MambaBlock(d_model, d_state),
+            MambaBlock(d_model, d_state),
+            MHABlock(d_model, n_heads),
+        ])
+        self.ln_f = nn.LayerNorm(d_model)
+        self.head = nn.Linear(d_model, vocab_size)
+
+    def forward(self, x):
+        B, T = x.shape
+        x = self.embed(x) + self.pos(torch.arange(T, device=x.device))
+        for block in self.blocks:
+            x = block(x)
+        return self.head(self.ln_f(x))
+''',
+
+    # Mamba 5:1 (push the ratio further)
+    "Transformer_Mamba5to1": '''
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+# ============ MHA Block ============
+class MHA(nn.Module):
+    def __init__(self, d_model, n_heads, dropout=0.1):
+        super().__init__()
+        self.n_heads = n_heads
+        self.head_dim = d_model // n_heads
+        self.scale = self.head_dim ** -0.5
+        self.qkv = nn.Linear(d_model, 3 * d_model)
+        self.out = nn.Linear(d_model, d_model)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        B, N, C = x.shape
+        qkv = self.qkv(x).reshape(B, N, 3, self.n_heads, self.head_dim).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv[0], qkv[1], qkv[2]
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+        mask = torch.triu(torch.ones(N, N, device=x.device), diagonal=1).bool()
+        attn = attn.masked_fill(mask, float('-inf'))
+        attn = F.softmax(attn, dim=-1)
+        attn = self.dropout(attn)
+        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
+        return self.out(x)
+
+class MHABlock(nn.Module):
+    def __init__(self, d_model, n_heads):
+        super().__init__()
+        self.ln1 = nn.LayerNorm(d_model)
+        self.attn = MHA(d_model, n_heads)
+        self.ln2 = nn.LayerNorm(d_model)
+        self.ffn = nn.Sequential(
+            nn.Linear(d_model, d_model * 4), nn.GELU(),
+            nn.Linear(d_model * 4, d_model), nn.Dropout(0.1),
+        )
+
+    def forward(self, x):
+        x = x + self.attn(self.ln1(x))
+        x = x + self.ffn(self.ln2(x))
+        return x
+
+# ============ SSM Block ============
+class SelectiveSSM(nn.Module):
+    def __init__(self, d_model, d_state=16, d_conv=4, expand=2, dropout=0.1):
+        super().__init__()
+        self.d_model = d_model
+        self.d_state = d_state
+        self.d_inner = int(expand * d_model)
+        self.in_proj = nn.Linear(d_model, self.d_inner * 2, bias=False)
+        self.conv1d = nn.Conv1d(self.d_inner, self.d_inner, kernel_size=d_conv,
+                                padding=d_conv - 1, groups=self.d_inner, bias=True)
+        self.x_proj = nn.Linear(self.d_inner, d_state * 2 + 1, bias=False)
+        self.dt_proj = nn.Linear(1, self.d_inner, bias=True)
+        self.A = nn.Parameter(torch.randn(self.d_inner, d_state))
+        self.D = nn.Parameter(torch.ones(self.d_inner))
+        self.out_proj = nn.Linear(self.d_inner, d_model, bias=False)
+        self.dropout = nn.Dropout(dropout)
+        with torch.no_grad():
+            self.A.copy_(-torch.exp(torch.linspace(0, 4, d_state)).unsqueeze(0).expand(self.d_inner, -1))
+
+    def forward(self, x):
+        B, L, D = x.shape
+        xz = self.in_proj(x)
+        x_main, z = xz.chunk(2, dim=-1)
+        x_conv = self.conv1d(x_main.transpose(1, 2))[:, :, :L].transpose(1, 2)
+        x_conv = F.silu(x_conv)
+        x_ssm = self.x_proj(x_conv)
+        dt, B_input, C = x_ssm[:, :, :1], x_ssm[:, :, 1:self.d_state+1], x_ssm[:, :, self.d_state+1:]
+        dt = F.softplus(self.dt_proj(dt))
+        A = self.A
+        h = torch.zeros(B, self.d_inner, self.d_state, device=x.device, dtype=x.dtype)
+        outputs = []
+        for t in range(L):
+            dt_t, B_t, C_t, x_t = dt[:, t, :], B_input[:, t, :], C[:, t, :], x_conv[:, t, :]
+            A_bar = torch.exp(dt_t.unsqueeze(-1) * A.unsqueeze(0))
+            B_bar = dt_t.unsqueeze(-1) * B_t.unsqueeze(1)
+            h = A_bar * h + B_bar * x_t.unsqueeze(-1)
+            y_t = (h * C_t.unsqueeze(1)).sum(-1) + self.D * x_t
+            outputs.append(y_t)
+        y = torch.stack(outputs, dim=1)
+        y = y * F.silu(z)
+        return self.dropout(self.out_proj(y))
+
+class MambaBlock(nn.Module):
+    def __init__(self, d_model, d_state=16):
+        super().__init__()
+        self.ln1 = nn.LayerNorm(d_model)
+        self.ssm = SelectiveSSM(d_model, d_state=d_state)
+        self.ln2 = nn.LayerNorm(d_model)
+        self.ffn = nn.Sequential(
+            nn.Linear(d_model, d_model * 4), nn.GELU(),
+            nn.Linear(d_model * 4, d_model), nn.Dropout(0.1),
+        )
+
+    def forward(self, x):
+        x = x + self.ssm(self.ln1(x))
+        x = x + self.ffn(self.ln2(x))
+        return x
+
+class Transformer_Mamba5to1(nn.Module):
+    """Mamba 5:1: Push the ratio even further.
+
+    Architecture: [Mamba, Mamba, Mamba, Mamba, Mamba, MHA]
+    - 5 Mamba layers for maximum SSM quality
+    - 1 MHA at end for global cleanup
+
+    Hypothesis: 4:1 beat 3:1. Will 5:1 beat 4:1?
+    Testing if more Mamba continues to improve quality.
+    """
+    def __init__(self, d_model=256, vocab_size=8000, n_layers=4, n_heads=8):
+        super().__init__()
+        d_state = max(16, d_model // 16)
+        self.embed = nn.Embedding(vocab_size, d_model)
+        self.pos = nn.Embedding(5000, d_model)
+        # [M, M, M, M, M, MHA] - 6 layers total
+        blocks = []
+        for i in range(5):
+            blocks.append(MambaBlock(d_model, d_state))
+        blocks.append(MHABlock(d_model, n_heads))
+        self.blocks = nn.ModuleList(blocks)
+        self.ln_f = nn.LayerNorm(d_model)
+        self.head = nn.Linear(d_model, vocab_size)
+
+    def forward(self, x):
+        B, T = x.shape
+        x = self.embed(x) + self.pos(torch.arange(T, device=x.device))
+        for block in self.blocks:
+            x = block(x)
+        return self.head(self.ln_f(x))
+''',
+
+    # GQA-Mamba Heavy (GQA start + 3 Mamba for quality)
+    "Transformer_GQAMambaHeavy": '''
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class GQA(nn.Module):
+    def __init__(self, d_model, n_heads, n_kv_heads=2, dropout=0.1):
+        super().__init__()
+        self.n_heads, self.n_kv_heads = n_heads, n_kv_heads
+        self.head_dim = d_model // n_heads
+        self.scale = self.head_dim ** -0.5
+        self.q_proj = nn.Linear(d_model, d_model)
+        self.k_proj = nn.Linear(d_model, n_kv_heads * self.head_dim)
+        self.v_proj = nn.Linear(d_model, n_kv_heads * self.head_dim)
+        self.out = nn.Linear(d_model, d_model)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        B, N, C = x.shape
+        q = self.q_proj(x).reshape(B, N, self.n_heads, self.head_dim).transpose(1, 2)
+        k = self.k_proj(x).reshape(B, N, self.n_kv_heads, self.head_dim).transpose(1, 2)
+        v = self.v_proj(x).reshape(B, N, self.n_kv_heads, self.head_dim).transpose(1, 2)
+        k = k.repeat_interleave(self.n_heads // self.n_kv_heads, dim=1)
+        v = v.repeat_interleave(self.n_heads // self.n_kv_heads, dim=1)
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+        mask = torch.triu(torch.ones(N, N, device=x.device), diagonal=1).bool()
+        attn = attn.masked_fill(mask, float('-inf'))
+        attn = self.dropout(F.softmax(attn, dim=-1))
+        return self.out((attn @ v).transpose(1, 2).reshape(B, N, C))
+
+class GQABlock(nn.Module):
+    def __init__(self, d_model, n_heads):
+        super().__init__()
+        self.ln1, self.ln2 = nn.LayerNorm(d_model), nn.LayerNorm(d_model)
+        self.attn = GQA(d_model, n_heads)
+        self.ffn = nn.Sequential(nn.Linear(d_model, d_model*4), nn.GELU(), nn.Linear(d_model*4, d_model), nn.Dropout(0.1))
+    def forward(self, x):
+        x = x + self.attn(self.ln1(x))
+        return x + self.ffn(self.ln2(x))
+
+class SelectiveSSM(nn.Module):
+    def __init__(self, d_model, d_state=16, d_conv=4, expand=2, dropout=0.1):
+        super().__init__()
+        self.d_inner = int(expand * d_model)
+        self.d_state = d_state
+        self.in_proj = nn.Linear(d_model, self.d_inner * 2, bias=False)
+        self.conv1d = nn.Conv1d(self.d_inner, self.d_inner, kernel_size=d_conv, padding=d_conv-1, groups=self.d_inner)
+        self.x_proj = nn.Linear(self.d_inner, d_state * 2 + 1, bias=False)
+        self.dt_proj = nn.Linear(1, self.d_inner)
+        self.A = nn.Parameter(-torch.exp(torch.linspace(0, 4, d_state)).unsqueeze(0).expand(self.d_inner, -1).clone())
+        self.D = nn.Parameter(torch.ones(self.d_inner))
+        self.out_proj = nn.Linear(self.d_inner, d_model, bias=False)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        B, L, _ = x.shape
+        xz = self.in_proj(x)
+        x_main, z = xz.chunk(2, dim=-1)
+        x_conv = F.silu(self.conv1d(x_main.transpose(1,2))[:,:,:L].transpose(1,2))
+        x_ssm = self.x_proj(x_conv)
+        dt = F.softplus(self.dt_proj(x_ssm[:,:,:1]))
+        B_in, C = x_ssm[:,:,1:self.d_state+1], x_ssm[:,:,self.d_state+1:]
+        h = torch.zeros(B, self.d_inner, self.d_state, device=x.device, dtype=x.dtype)
+        outs = []
+        for t in range(L):
+            A_bar = torch.exp(dt[:,t,:].unsqueeze(-1) * self.A.unsqueeze(0))
+            B_bar = dt[:,t,:].unsqueeze(-1) * B_in[:,t,:].unsqueeze(1)
+            h = A_bar * h + B_bar * x_conv[:,t,:].unsqueeze(-1)
+            outs.append((h * C[:,t,:].unsqueeze(1)).sum(-1) + self.D * x_conv[:,t,:])
+        return self.dropout(self.out_proj(torch.stack(outs, 1) * F.silu(z)))
+
+class MambaBlock(nn.Module):
+    def __init__(self, d_model, d_state=16):
+        super().__init__()
+        self.ln1, self.ln2 = nn.LayerNorm(d_model), nn.LayerNorm(d_model)
+        self.ssm = SelectiveSSM(d_model, d_state)
+        self.ffn = nn.Sequential(nn.Linear(d_model, d_model*4), nn.GELU(), nn.Linear(d_model*4, d_model), nn.Dropout(0.1))
+    def forward(self, x):
+        x = x + self.ssm(self.ln1(x))
+        return x + self.ffn(self.ln2(x))
+
+class Transformer_GQAMambaHeavy(nn.Module):
+    """GQA-Mamba Heavy: Fast GQA start + 3 quality Mamba layers.
+    Architecture: [GQA, Mamba, Mamba, Mamba]
+    Hypothesis: GQA establishes fast global context, Mamba refines with quality.
+    """
+    def __init__(self, d_model=256, vocab_size=8000, n_layers=4, n_heads=8):
+        super().__init__()
+        d_state = max(16, d_model // 16)
+        self.embed = nn.Embedding(vocab_size, d_model)
+        self.pos = nn.Embedding(5000, d_model)
+        self.blocks = nn.ModuleList([GQABlock(d_model, n_heads)] + [MambaBlock(d_model, d_state) for _ in range(3)])
+        self.ln_f = nn.LayerNorm(d_model)
+        self.head = nn.Linear(d_model, vocab_size)
+    def forward(self, x):
+        B, T = x.shape
+        x = self.embed(x) + self.pos(torch.arange(T, device=x.device))
+        for block in self.blocks: x = block(x)
+        return self.head(self.ln_f(x))
+''',
+
+    # MQA-Mamba (most KV-efficient attention + SSM)
+    "Transformer_MQAMamba": '''
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class MQA(nn.Module):
+    def __init__(self, d_model, n_heads, dropout=0.1):
+        super().__init__()
+        self.n_heads = n_heads
+        self.head_dim = d_model // n_heads
+        self.scale = self.head_dim ** -0.5
+        self.q_proj = nn.Linear(d_model, d_model)
+        self.k_proj = nn.Linear(d_model, self.head_dim)
+        self.v_proj = nn.Linear(d_model, self.head_dim)
+        self.out = nn.Linear(d_model, d_model)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        B, N, C = x.shape
+        q = self.q_proj(x).reshape(B, N, self.n_heads, self.head_dim).transpose(1, 2)
+        k = self.k_proj(x).reshape(B, N, 1, self.head_dim).transpose(1, 2).repeat(1, self.n_heads, 1, 1)
+        v = self.v_proj(x).reshape(B, N, 1, self.head_dim).transpose(1, 2).repeat(1, self.n_heads, 1, 1)
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+        mask = torch.triu(torch.ones(N, N, device=x.device), diagonal=1).bool()
+        attn = attn.masked_fill(mask, float('-inf'))
+        attn = self.dropout(F.softmax(attn, dim=-1))
+        return self.out((attn @ v).transpose(1, 2).reshape(B, N, C))
+
+class MQABlock(nn.Module):
+    def __init__(self, d_model, n_heads):
+        super().__init__()
+        self.ln1, self.ln2 = nn.LayerNorm(d_model), nn.LayerNorm(d_model)
+        self.attn = MQA(d_model, n_heads)
+        self.ffn = nn.Sequential(nn.Linear(d_model, d_model*4), nn.GELU(), nn.Linear(d_model*4, d_model), nn.Dropout(0.1))
+    def forward(self, x):
+        x = x + self.attn(self.ln1(x))
+        return x + self.ffn(self.ln2(x))
+
+class SelectiveSSM(nn.Module):
+    def __init__(self, d_model, d_state=16, d_conv=4, expand=2, dropout=0.1):
+        super().__init__()
+        self.d_inner = int(expand * d_model)
+        self.d_state = d_state
+        self.in_proj = nn.Linear(d_model, self.d_inner * 2, bias=False)
+        self.conv1d = nn.Conv1d(self.d_inner, self.d_inner, kernel_size=d_conv, padding=d_conv-1, groups=self.d_inner)
+        self.x_proj = nn.Linear(self.d_inner, d_state * 2 + 1, bias=False)
+        self.dt_proj = nn.Linear(1, self.d_inner)
+        self.A = nn.Parameter(-torch.exp(torch.linspace(0, 4, d_state)).unsqueeze(0).expand(self.d_inner, -1).clone())
+        self.D = nn.Parameter(torch.ones(self.d_inner))
+        self.out_proj = nn.Linear(self.d_inner, d_model, bias=False)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        B, L, _ = x.shape
+        xz = self.in_proj(x)
+        x_main, z = xz.chunk(2, dim=-1)
+        x_conv = F.silu(self.conv1d(x_main.transpose(1,2))[:,:,:L].transpose(1,2))
+        x_ssm = self.x_proj(x_conv)
+        dt = F.softplus(self.dt_proj(x_ssm[:,:,:1]))
+        B_in, C = x_ssm[:,:,1:self.d_state+1], x_ssm[:,:,self.d_state+1:]
+        h = torch.zeros(B, self.d_inner, self.d_state, device=x.device, dtype=x.dtype)
+        outs = []
+        for t in range(L):
+            A_bar = torch.exp(dt[:,t,:].unsqueeze(-1) * self.A.unsqueeze(0))
+            B_bar = dt[:,t,:].unsqueeze(-1) * B_in[:,t,:].unsqueeze(1)
+            h = A_bar * h + B_bar * x_conv[:,t,:].unsqueeze(-1)
+            outs.append((h * C[:,t,:].unsqueeze(1)).sum(-1) + self.D * x_conv[:,t,:])
+        return self.dropout(self.out_proj(torch.stack(outs, 1) * F.silu(z)))
+
+class MambaBlock(nn.Module):
+    def __init__(self, d_model, d_state=16):
+        super().__init__()
+        self.ln1, self.ln2 = nn.LayerNorm(d_model), nn.LayerNorm(d_model)
+        self.ssm = SelectiveSSM(d_model, d_state)
+        self.ffn = nn.Sequential(nn.Linear(d_model, d_model*4), nn.GELU(), nn.Linear(d_model*4, d_model), nn.Dropout(0.1))
+    def forward(self, x):
+        x = x + self.ssm(self.ln1(x))
+        return x + self.ffn(self.ln2(x))
+
+class Transformer_MQAMamba(nn.Module):
+    """MQA-Mamba: Most KV-efficient attention + SSM quality.
+    Architecture: [MQA, Mamba, MQA, Mamba]
+    Hypothesis: MQA even more efficient than GQA, test if quality holds.
+    """
+    def __init__(self, d_model=256, vocab_size=8000, n_layers=4, n_heads=8):
+        super().__init__()
+        d_state = max(16, d_model // 16)
+        self.embed = nn.Embedding(vocab_size, d_model)
+        self.pos = nn.Embedding(5000, d_model)
+        self.blocks = nn.ModuleList([MQABlock(d_model, n_heads), MambaBlock(d_model, d_state), MQABlock(d_model, n_heads), MambaBlock(d_model, d_state)])
+        self.ln_f = nn.LayerNorm(d_model)
+        self.head = nn.Linear(d_model, vocab_size)
+    def forward(self, x):
+        B, T = x.shape
+        x = self.embed(x) + self.pos(torch.arange(T, device=x.device))
+        for block in self.blocks: x = block(x)
+        return self.head(self.ln_f(x))
+''',
+
+    # GQA-Mamba5 (GQA speed start + 5 Mamba quality)
+    "Transformer_GQAMamba5": '''
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class GQA(nn.Module):
+    def __init__(self, d_model, n_heads, n_kv_heads=2, dropout=0.1):
+        super().__init__()
+        self.n_heads, self.n_kv_heads = n_heads, n_kv_heads
+        self.head_dim = d_model // n_heads
+        self.scale = self.head_dim ** -0.5
+        self.q_proj = nn.Linear(d_model, d_model)
+        self.k_proj = nn.Linear(d_model, n_kv_heads * self.head_dim)
+        self.v_proj = nn.Linear(d_model, n_kv_heads * self.head_dim)
+        self.out = nn.Linear(d_model, d_model)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        B, N, C = x.shape
+        q = self.q_proj(x).reshape(B, N, self.n_heads, self.head_dim).transpose(1, 2)
+        k = self.k_proj(x).reshape(B, N, self.n_kv_heads, self.head_dim).transpose(1, 2)
+        v = self.v_proj(x).reshape(B, N, self.n_kv_heads, self.head_dim).transpose(1, 2)
+        k = k.repeat_interleave(self.n_heads // self.n_kv_heads, dim=1)
+        v = v.repeat_interleave(self.n_heads // self.n_kv_heads, dim=1)
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+        mask = torch.triu(torch.ones(N, N, device=x.device), diagonal=1).bool()
+        attn = attn.masked_fill(mask, float('-inf'))
+        attn = self.dropout(F.softmax(attn, dim=-1))
+        return self.out((attn @ v).transpose(1, 2).reshape(B, N, C))
+
+class GQABlock(nn.Module):
+    def __init__(self, d_model, n_heads):
+        super().__init__()
+        self.ln1, self.ln2 = nn.LayerNorm(d_model), nn.LayerNorm(d_model)
+        self.attn = GQA(d_model, n_heads)
+        self.ffn = nn.Sequential(nn.Linear(d_model, d_model*4), nn.GELU(), nn.Linear(d_model*4, d_model), nn.Dropout(0.1))
+    def forward(self, x):
+        x = x + self.attn(self.ln1(x))
+        return x + self.ffn(self.ln2(x))
+
+class SelectiveSSM(nn.Module):
+    def __init__(self, d_model, d_state=16, d_conv=4, expand=2, dropout=0.1):
+        super().__init__()
+        self.d_inner = int(expand * d_model)
+        self.d_state = d_state
+        self.in_proj = nn.Linear(d_model, self.d_inner * 2, bias=False)
+        self.conv1d = nn.Conv1d(self.d_inner, self.d_inner, kernel_size=d_conv, padding=d_conv-1, groups=self.d_inner)
+        self.x_proj = nn.Linear(self.d_inner, d_state * 2 + 1, bias=False)
+        self.dt_proj = nn.Linear(1, self.d_inner)
+        self.A = nn.Parameter(-torch.exp(torch.linspace(0, 4, d_state)).unsqueeze(0).expand(self.d_inner, -1).clone())
+        self.D = nn.Parameter(torch.ones(self.d_inner))
+        self.out_proj = nn.Linear(self.d_inner, d_model, bias=False)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        B, L, _ = x.shape
+        xz = self.in_proj(x)
+        x_main, z = xz.chunk(2, dim=-1)
+        x_conv = F.silu(self.conv1d(x_main.transpose(1,2))[:,:,:L].transpose(1,2))
+        x_ssm = self.x_proj(x_conv)
+        dt = F.softplus(self.dt_proj(x_ssm[:,:,:1]))
+        B_in, C = x_ssm[:,:,1:self.d_state+1], x_ssm[:,:,self.d_state+1:]
+        h = torch.zeros(B, self.d_inner, self.d_state, device=x.device, dtype=x.dtype)
+        outs = []
+        for t in range(L):
+            A_bar = torch.exp(dt[:,t,:].unsqueeze(-1) * self.A.unsqueeze(0))
+            B_bar = dt[:,t,:].unsqueeze(-1) * B_in[:,t,:].unsqueeze(1)
+            h = A_bar * h + B_bar * x_conv[:,t,:].unsqueeze(-1)
+            outs.append((h * C[:,t,:].unsqueeze(1)).sum(-1) + self.D * x_conv[:,t,:])
+        return self.dropout(self.out_proj(torch.stack(outs, 1) * F.silu(z)))
+
+class MambaBlock(nn.Module):
+    def __init__(self, d_model, d_state=16):
+        super().__init__()
+        self.ln1, self.ln2 = nn.LayerNorm(d_model), nn.LayerNorm(d_model)
+        self.ssm = SelectiveSSM(d_model, d_state)
+        self.ffn = nn.Sequential(nn.Linear(d_model, d_model*4), nn.GELU(), nn.Linear(d_model*4, d_model), nn.Dropout(0.1))
+    def forward(self, x):
+        x = x + self.ssm(self.ln1(x))
+        return x + self.ffn(self.ln2(x))
+
+class Transformer_GQAMamba5(nn.Module):
+    """GQA-Mamba5: GQA speed + 5 Mamba quality layers.
+    Architecture: [GQA, Mamba, Mamba, Mamba, Mamba, Mamba]
+    Hypothesis: Fast GQA start, then max Mamba for quality push.
+    """
+    def __init__(self, d_model=256, vocab_size=8000, n_layers=4, n_heads=8):
+        super().__init__()
+        d_state = max(16, d_model // 16)
+        self.embed = nn.Embedding(vocab_size, d_model)
+        self.pos = nn.Embedding(5000, d_model)
+        self.blocks = nn.ModuleList([GQABlock(d_model, n_heads)] + [MambaBlock(d_model, d_state) for _ in range(5)])
+        self.ln_f = nn.LayerNorm(d_model)
+        self.head = nn.Linear(d_model, vocab_size)
+    def forward(self, x):
+        B, T = x.shape
+        x = self.embed(x) + self.pos(torch.arange(T, device=x.device))
+        for block in self.blocks: x = block(x)
+        return self.head(self.ln_f(x))
+''',
+
+    # ============================================================
+    # SPEED TIER: Fast GQA/MQA variants targeting <100s training
+    # ============================================================
+
+    # GQA3_MHA: 3 GQA + 1 MHA anchor (expected ~91s)
+    "Transformer_GQA3_MHA": '''
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class GQA(nn.Module):
+    """Grouped Query Attention with causal masking"""
+    def __init__(self, d_model, n_heads, n_kv_heads=2, dropout=0.1):
+        super().__init__()
+        self.n_heads = n_heads
+        self.n_kv_heads = n_kv_heads
+        self.head_dim = d_model // n_heads
+        self.scale = self.head_dim ** -0.5
+        self.q_proj = nn.Linear(d_model, d_model)
+        self.k_proj = nn.Linear(d_model, n_kv_heads * self.head_dim)
+        self.v_proj = nn.Linear(d_model, n_kv_heads * self.head_dim)
+        self.out = nn.Linear(d_model, d_model)
+        self.dropout = nn.Dropout(dropout)
+    def forward(self, x):
+        B, N, C = x.shape
+        q = self.q_proj(x).reshape(B, N, self.n_heads, self.head_dim).transpose(1, 2).contiguous()
+        k = self.k_proj(x).reshape(B, N, self.n_kv_heads, self.head_dim).transpose(1, 2).contiguous()
+        v = self.v_proj(x).reshape(B, N, self.n_kv_heads, self.head_dim).transpose(1, 2).contiguous()
+        n_rep = self.n_heads // self.n_kv_heads
+        k = k.repeat_interleave(n_rep, dim=1).contiguous()
+        v = v.repeat_interleave(n_rep, dim=1).contiguous()
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+        mask = torch.triu(torch.ones(N, N, device=x.device), diagonal=1).bool()
+        attn = attn.masked_fill(mask, float('-inf'))
+        attn = F.softmax(attn, dim=-1)
+        attn = self.dropout(attn)
+        x = (attn @ v).transpose(1, 2).contiguous().reshape(B, N, C)
+        return self.out(x)
+
+class MHA(nn.Module):
+    """Standard Multi-Head Attention with causal masking"""
+    def __init__(self, d_model, n_heads, dropout=0.1):
+        super().__init__()
+        self.n_heads = n_heads
+        self.head_dim = d_model // n_heads
+        self.scale = self.head_dim ** -0.5
+        self.qkv = nn.Linear(d_model, 3 * d_model)
+        self.out = nn.Linear(d_model, d_model)
+        self.dropout = nn.Dropout(dropout)
+    def forward(self, x):
+        B, N, C = x.shape
+        qkv = self.qkv(x).reshape(B, N, 3, self.n_heads, self.head_dim).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv[0], qkv[1], qkv[2]
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+        mask = torch.triu(torch.ones(N, N, device=x.device), diagonal=1).bool()
+        attn = attn.masked_fill(mask, float('-inf'))
+        attn = F.softmax(attn, dim=-1)
+        attn = self.dropout(attn)
+        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
+        return self.out(x)
+
+class GQABlock(nn.Module):
+    def __init__(self, d_model, n_heads):
+        super().__init__()
+        self.ln1 = nn.LayerNorm(d_model)
+        self.attn = GQA(d_model, n_heads, n_kv_heads=2)
+        self.ln2 = nn.LayerNorm(d_model)
+        self.ffn = nn.Sequential(nn.Linear(d_model, d_model * 4), nn.GELU(), nn.Linear(d_model * 4, d_model), nn.Dropout(0.1))
+    def forward(self, x):
+        x = x + self.attn(self.ln1(x))
+        x = x + self.ffn(self.ln2(x))
+        return x
+
+class MHABlock(nn.Module):
+    def __init__(self, d_model, n_heads):
+        super().__init__()
+        self.ln1 = nn.LayerNorm(d_model)
+        self.attn = MHA(d_model, n_heads)
+        self.ln2 = nn.LayerNorm(d_model)
+        self.ffn = nn.Sequential(nn.Linear(d_model, d_model * 4), nn.GELU(), nn.Linear(d_model * 4, d_model), nn.Dropout(0.1))
+    def forward(self, x):
+        x = x + self.attn(self.ln1(x))
+        x = x + self.ffn(self.ln2(x))
+        return x
+
+class Transformer_GQA3_MHA(nn.Module):
+    """GQA3_MHA: 3 fast GQA layers + 1 MHA anchor at end.
+    Architecture: [GQA, GQA, GQA, MHA]
+    Hypothesis: GQA speed with MHA quality anchor at end.
+    Expected time: ~91s (3*14s + 49s)
+    """
+    def __init__(self, d_model=256, vocab_size=8000, n_layers=4, n_heads=8):
+        super().__init__()
+        self.embed = nn.Embedding(vocab_size, d_model)
+        self.pos = nn.Embedding(5000, d_model)
+        self.blocks = nn.ModuleList([GQABlock(d_model, n_heads) for _ in range(3)] + [MHABlock(d_model, n_heads)])
+        self.ln_f = nn.LayerNorm(d_model)
+        self.head = nn.Linear(d_model, vocab_size)
+    def forward(self, x):
+        B, T = x.shape
+        x = self.embed(x) + self.pos(torch.arange(T, device=x.device))
+        for block in self.blocks: x = block(x)
+        return self.head(self.ln_f(x))
+''',
+
+    # MQA3_MHA: 3 MQA + 1 MHA anchor (expected ~94s)
+    "Transformer_MQA3_MHA": '''
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class MQA(nn.Module):
+    """Multi-Query Attention with causal masking"""
+    def __init__(self, d_model, n_heads, dropout=0.1):
+        super().__init__()
+        self.n_heads = n_heads
+        self.head_dim = d_model // n_heads
+        self.scale = self.head_dim ** -0.5
+        self.q_proj = nn.Linear(d_model, d_model)
+        self.k_proj = nn.Linear(d_model, self.head_dim)
+        self.v_proj = nn.Linear(d_model, self.head_dim)
+        self.out = nn.Linear(d_model, d_model)
+        self.dropout = nn.Dropout(dropout)
+    def forward(self, x):
+        B, N, C = x.shape
+        q = self.q_proj(x).reshape(B, N, self.n_heads, self.head_dim).transpose(1, 2).contiguous()
+        k = self.k_proj(x).reshape(B, N, 1, self.head_dim).transpose(1, 2).contiguous()
+        v = self.v_proj(x).reshape(B, N, 1, self.head_dim).transpose(1, 2).contiguous()
+        k = k.repeat(1, self.n_heads, 1, 1)
+        v = v.repeat(1, self.n_heads, 1, 1)
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+        mask = torch.triu(torch.ones(N, N, device=x.device), diagonal=1).bool()
+        attn = attn.masked_fill(mask, float('-inf'))
+        attn = F.softmax(attn, dim=-1)
+        attn = self.dropout(attn)
+        x = (attn @ v).transpose(1, 2).contiguous().reshape(B, N, C)
+        return self.out(x)
+
+class MHA(nn.Module):
+    """Standard Multi-Head Attention with causal masking"""
+    def __init__(self, d_model, n_heads, dropout=0.1):
+        super().__init__()
+        self.n_heads = n_heads
+        self.head_dim = d_model // n_heads
+        self.scale = self.head_dim ** -0.5
+        self.qkv = nn.Linear(d_model, 3 * d_model)
+        self.out = nn.Linear(d_model, d_model)
+        self.dropout = nn.Dropout(dropout)
+    def forward(self, x):
+        B, N, C = x.shape
+        qkv = self.qkv(x).reshape(B, N, 3, self.n_heads, self.head_dim).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv[0], qkv[1], qkv[2]
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+        mask = torch.triu(torch.ones(N, N, device=x.device), diagonal=1).bool()
+        attn = attn.masked_fill(mask, float('-inf'))
+        attn = F.softmax(attn, dim=-1)
+        attn = self.dropout(attn)
+        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
+        return self.out(x)
+
+class MQABlock(nn.Module):
+    def __init__(self, d_model, n_heads):
+        super().__init__()
+        self.ln1 = nn.LayerNorm(d_model)
+        self.attn = MQA(d_model, n_heads)
+        self.ln2 = nn.LayerNorm(d_model)
+        self.ffn = nn.Sequential(nn.Linear(d_model, d_model * 4), nn.GELU(), nn.Linear(d_model * 4, d_model), nn.Dropout(0.1))
+    def forward(self, x):
+        x = x + self.attn(self.ln1(x))
+        x = x + self.ffn(self.ln2(x))
+        return x
+
+class MHABlock(nn.Module):
+    def __init__(self, d_model, n_heads):
+        super().__init__()
+        self.ln1 = nn.LayerNorm(d_model)
+        self.attn = MHA(d_model, n_heads)
+        self.ln2 = nn.LayerNorm(d_model)
+        self.ffn = nn.Sequential(nn.Linear(d_model, d_model * 4), nn.GELU(), nn.Linear(d_model * 4, d_model), nn.Dropout(0.1))
+    def forward(self, x):
+        x = x + self.attn(self.ln1(x))
+        x = x + self.ffn(self.ln2(x))
+        return x
+
+class Transformer_MQA3_MHA(nn.Module):
+    """MQA3_MHA: 3 fast MQA layers + 1 MHA anchor at end.
+    Architecture: [MQA, MQA, MQA, MHA]
+    Hypothesis: MQA speed with MHA quality anchor at end.
+    Expected time: ~94s (3*15s + 49s)
+    """
+    def __init__(self, d_model=256, vocab_size=8000, n_layers=4, n_heads=8):
+        super().__init__()
+        self.embed = nn.Embedding(vocab_size, d_model)
+        self.pos = nn.Embedding(5000, d_model)
+        self.blocks = nn.ModuleList([MQABlock(d_model, n_heads) for _ in range(3)] + [MHABlock(d_model, n_heads)])
+        self.ln_f = nn.LayerNorm(d_model)
+        self.head = nn.Linear(d_model, vocab_size)
+    def forward(self, x):
+        B, T = x.shape
+        x = self.embed(x) + self.pos(torch.arange(T, device=x.device))
+        for block in self.blocks: x = block(x)
+        return self.head(self.ln_f(x))
+''',
+
+    # GQA_MQA_Mix: Alternating GQA and MQA (expected ~58s)
+    "Transformer_GQA_MQA_Mix": '''
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class GQA(nn.Module):
+    """Grouped Query Attention with causal masking"""
+    def __init__(self, d_model, n_heads, n_kv_heads=2, dropout=0.1):
+        super().__init__()
+        self.n_heads = n_heads
+        self.n_kv_heads = n_kv_heads
+        self.head_dim = d_model // n_heads
+        self.scale = self.head_dim ** -0.5
+        self.q_proj = nn.Linear(d_model, d_model)
+        self.k_proj = nn.Linear(d_model, n_kv_heads * self.head_dim)
+        self.v_proj = nn.Linear(d_model, n_kv_heads * self.head_dim)
+        self.out = nn.Linear(d_model, d_model)
+        self.dropout = nn.Dropout(dropout)
+    def forward(self, x):
+        B, N, C = x.shape
+        q = self.q_proj(x).reshape(B, N, self.n_heads, self.head_dim).transpose(1, 2).contiguous()
+        k = self.k_proj(x).reshape(B, N, self.n_kv_heads, self.head_dim).transpose(1, 2).contiguous()
+        v = self.v_proj(x).reshape(B, N, self.n_kv_heads, self.head_dim).transpose(1, 2).contiguous()
+        n_rep = self.n_heads // self.n_kv_heads
+        k = k.repeat_interleave(n_rep, dim=1).contiguous()
+        v = v.repeat_interleave(n_rep, dim=1).contiguous()
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+        mask = torch.triu(torch.ones(N, N, device=x.device), diagonal=1).bool()
+        attn = attn.masked_fill(mask, float('-inf'))
+        attn = F.softmax(attn, dim=-1)
+        attn = self.dropout(attn)
+        x = (attn @ v).transpose(1, 2).contiguous().reshape(B, N, C)
+        return self.out(x)
+
+class MQA(nn.Module):
+    """Multi-Query Attention with causal masking"""
+    def __init__(self, d_model, n_heads, dropout=0.1):
+        super().__init__()
+        self.n_heads = n_heads
+        self.head_dim = d_model // n_heads
+        self.scale = self.head_dim ** -0.5
+        self.q_proj = nn.Linear(d_model, d_model)
+        self.k_proj = nn.Linear(d_model, self.head_dim)
+        self.v_proj = nn.Linear(d_model, self.head_dim)
+        self.out = nn.Linear(d_model, d_model)
+        self.dropout = nn.Dropout(dropout)
+    def forward(self, x):
+        B, N, C = x.shape
+        q = self.q_proj(x).reshape(B, N, self.n_heads, self.head_dim).transpose(1, 2).contiguous()
+        k = self.k_proj(x).reshape(B, N, 1, self.head_dim).transpose(1, 2).contiguous()
+        v = self.v_proj(x).reshape(B, N, 1, self.head_dim).transpose(1, 2).contiguous()
+        k = k.repeat(1, self.n_heads, 1, 1)
+        v = v.repeat(1, self.n_heads, 1, 1)
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+        mask = torch.triu(torch.ones(N, N, device=x.device), diagonal=1).bool()
+        attn = attn.masked_fill(mask, float('-inf'))
+        attn = F.softmax(attn, dim=-1)
+        attn = self.dropout(attn)
+        x = (attn @ v).transpose(1, 2).contiguous().reshape(B, N, C)
+        return self.out(x)
+
+class GQABlock(nn.Module):
+    def __init__(self, d_model, n_heads):
+        super().__init__()
+        self.ln1 = nn.LayerNorm(d_model)
+        self.attn = GQA(d_model, n_heads, n_kv_heads=2)
+        self.ln2 = nn.LayerNorm(d_model)
+        self.ffn = nn.Sequential(nn.Linear(d_model, d_model * 4), nn.GELU(), nn.Linear(d_model * 4, d_model), nn.Dropout(0.1))
+    def forward(self, x):
+        x = x + self.attn(self.ln1(x))
+        x = x + self.ffn(self.ln2(x))
+        return x
+
+class MQABlock(nn.Module):
+    def __init__(self, d_model, n_heads):
+        super().__init__()
+        self.ln1 = nn.LayerNorm(d_model)
+        self.attn = MQA(d_model, n_heads)
+        self.ln2 = nn.LayerNorm(d_model)
+        self.ffn = nn.Sequential(nn.Linear(d_model, d_model * 4), nn.GELU(), nn.Linear(d_model * 4, d_model), nn.Dropout(0.1))
+    def forward(self, x):
+        x = x + self.attn(self.ln1(x))
+        x = x + self.ffn(self.ln2(x))
+        return x
+
+class Transformer_GQA_MQA_Mix(nn.Module):
+    """GQA_MQA_Mix: Alternating GQA and MQA layers.
+    Architecture: [GQA, MQA, GQA, MQA]
+    Hypothesis: Combining different KV-sharing strategies may complement each other.
+    Expected time: ~58s (2*14s + 2*15s)
+    """
+    def __init__(self, d_model=256, vocab_size=8000, n_layers=4, n_heads=8):
+        super().__init__()
+        self.embed = nn.Embedding(vocab_size, d_model)
+        self.pos = nn.Embedding(5000, d_model)
+        self.blocks = nn.ModuleList([GQABlock(d_model, n_heads), MQABlock(d_model, n_heads), GQABlock(d_model, n_heads), MQABlock(d_model, n_heads)])
+        self.ln_f = nn.LayerNorm(d_model)
+        self.head = nn.Linear(d_model, vocab_size)
+    def forward(self, x):
+        B, T = x.shape
+        x = self.embed(x) + self.pos(torch.arange(T, device=x.device))
+        for block in self.blocks: x = block(x)
+        return self.head(self.ln_f(x))
+''',
+
+    # DeepGQA6: 6-layer pure GQA (expected ~84s)
+    "Transformer_DeepGQA6": '''
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class GQA(nn.Module):
+    """Grouped Query Attention with causal masking"""
+    def __init__(self, d_model, n_heads, n_kv_heads=2, dropout=0.1):
+        super().__init__()
+        self.n_heads = n_heads
+        self.n_kv_heads = n_kv_heads
+        self.head_dim = d_model // n_heads
+        self.scale = self.head_dim ** -0.5
+        self.q_proj = nn.Linear(d_model, d_model)
+        self.k_proj = nn.Linear(d_model, n_kv_heads * self.head_dim)
+        self.v_proj = nn.Linear(d_model, n_kv_heads * self.head_dim)
+        self.out = nn.Linear(d_model, d_model)
+        self.dropout = nn.Dropout(dropout)
+    def forward(self, x):
+        B, N, C = x.shape
+        q = self.q_proj(x).reshape(B, N, self.n_heads, self.head_dim).transpose(1, 2).contiguous()
+        k = self.k_proj(x).reshape(B, N, self.n_kv_heads, self.head_dim).transpose(1, 2).contiguous()
+        v = self.v_proj(x).reshape(B, N, self.n_kv_heads, self.head_dim).transpose(1, 2).contiguous()
+        n_rep = self.n_heads // self.n_kv_heads
+        k = k.repeat_interleave(n_rep, dim=1).contiguous()
+        v = v.repeat_interleave(n_rep, dim=1).contiguous()
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+        mask = torch.triu(torch.ones(N, N, device=x.device), diagonal=1).bool()
+        attn = attn.masked_fill(mask, float('-inf'))
+        attn = F.softmax(attn, dim=-1)
+        attn = self.dropout(attn)
+        x = (attn @ v).transpose(1, 2).contiguous().reshape(B, N, C)
+        return self.out(x)
+
+class GQABlock(nn.Module):
+    def __init__(self, d_model, n_heads):
+        super().__init__()
+        self.ln1 = nn.LayerNorm(d_model)
+        self.attn = GQA(d_model, n_heads, n_kv_heads=2)
+        self.ln2 = nn.LayerNorm(d_model)
+        self.ffn = nn.Sequential(nn.Linear(d_model, d_model * 4), nn.GELU(), nn.Linear(d_model * 4, d_model), nn.Dropout(0.1))
+    def forward(self, x):
+        x = x + self.attn(self.ln1(x))
+        x = x + self.ffn(self.ln2(x))
+        return x
+
+class Transformer_DeepGQA6(nn.Module):
+    """DeepGQA6: 6-layer pure GQA for more depth.
+    Architecture: [GQA, GQA, GQA, GQA, GQA, GQA]
+    Hypothesis: More depth with fast layers may improve quality.
+    Expected time: ~84s (6*14s)
+    """
+    def __init__(self, d_model=256, vocab_size=8000, n_layers=4, n_heads=8):
+        super().__init__()
+        self.embed = nn.Embedding(vocab_size, d_model)
+        self.pos = nn.Embedding(5000, d_model)
+        self.blocks = nn.ModuleList([GQABlock(d_model, n_heads) for _ in range(6)])
+        self.ln_f = nn.LayerNorm(d_model)
+        self.head = nn.Linear(d_model, vocab_size)
+    def forward(self, x):
+        B, T = x.shape
+        x = self.embed(x) + self.pos(torch.arange(T, device=x.device))
+        for block in self.blocks: x = block(x)
+        return self.head(self.ln_f(x))
+''',
 }
 
 
@@ -1025,7 +2445,7 @@ def config_hash(config: dict) -> str:
     return hashlib.sha256(content.encode()).hexdigest()[:8]
 
 
-def result_to_training_run(result: dict, config: dict, baseline_run_id: str = "") -> TrainingRun:
+def result_to_training_run(result: dict, config: dict, baseline_run_id: str = "", model_code: str = "") -> TrainingRun:
     """Convert Modal result dict to TrainingRun dataclass."""
     # Local import to avoid Modal serialization issues
     import sys
@@ -1052,6 +2472,8 @@ def result_to_training_run(result: dict, config: dict, baseline_run_id: str = ""
         error=result.get("error", ""),
         is_baseline=result.get("is_baseline", False),
         baseline_run_id=baseline_run_id,
+        model_code=model_code,  # Store full model code for reproducibility
+        # code_hash is auto-computed by TrainingRun dataclass
         notes=f"config_hash={config_hash(config)}, dataset={config.get('dataset', 'wikitext-2')}",
     )
 
@@ -1066,9 +2488,17 @@ def get_cached_baseline(db: ArcFusionDB, config: dict) -> TrainingRun | None:
     return None
 
 
-def save_result_to_db(db: ArcFusionDB, result: dict, config: dict, baseline_run_id: str = "") -> str:
-    """Save training result to database."""
-    run = result_to_training_run(result, config, baseline_run_id)
+def save_result_to_db(db: ArcFusionDB, result: dict, config: dict, baseline_run_id: str = "", model_code: str = "") -> str:
+    """Save training result to database.
+
+    Args:
+        db: Database connection
+        result: Training result dict from Modal
+        config: Training config dict
+        baseline_run_id: Optional baseline run ID for comparison
+        model_code: Full Python code for model reproducibility (from MODELS dict)
+    """
+    run = result_to_training_run(result, config, baseline_run_id, model_code)
 
     # Calculate vs_baseline_pct if we have a baseline
     if baseline_run_id:
@@ -1137,8 +2567,8 @@ def main():
                 print(f"  Perplexity: {baseline_result['perplexity']:.2f}")
                 print(f"  Time: {baseline_result['time_seconds']:.1f}s")
 
-                # Save to DB
-                run_id = save_result_to_db(db, baseline_result, baseline_config)
+                # Save to DB with model code for reproducibility
+                run_id = save_result_to_db(db, baseline_result, baseline_config, model_code=baseline_code)
                 print(f"  Saved to DB: {run_id}")
             else:
                 print(f"  FAILED: {baseline_result['error']}")
@@ -1208,8 +2638,8 @@ def main():
                 else:
                     print(f"  vs Baseline: +{delta:.2f} ({pct:+.1f}%) worse{marker}")
 
-            # Save to DB (no baseline_run_id since we use stats now)
-            run_id = save_result_to_db(db, result, CONFIG)
+            # Save to DB with model code for reproducibility
+            run_id = save_result_to_db(db, result, CONFIG, model_code=code)
             print(f"  Saved to DB: {run_id}")
         else:
             print(f"\nFAILED: {result['error']}")

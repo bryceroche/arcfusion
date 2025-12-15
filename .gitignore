@@ -39,3 +39,4 @@ Thumbs.db
 htmlcov/
 other/
 .venv-modal/
+.env
