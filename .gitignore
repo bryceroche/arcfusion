@@ -25,6 +25,9 @@ ENV/
 
 # Database files (don't commit user data)
 *.db
+# But DO track these specific project databases
+!arcfusion.db
+!pre2017_experiment.db
 
 # OS
 .DS_Store
