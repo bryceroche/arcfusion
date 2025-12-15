@@ -1548,8 +1548,8 @@ class ArcFusionDB:
         baseline_stats = self.get_baseline_stats(baseline_model)
         baseline_ppl = baseline_stats["mean_ppl"]
 
-        # Get all successful runs
-        runs = self.list_training_runs(success_only=True, limit=1000)
+        # Get all successful runs (no limit for export)
+        runs = self.list_training_runs(success_only=True, limit=10000)
 
         # Group by model name, keeping best (lowest ppl) for each
         best_by_model: dict[str, TrainingRun] = {}
@@ -1636,12 +1636,17 @@ class ArcFusionDB:
         if baseline_ppl <= 0:
             return 0
 
-        runs = self.list_training_runs(success_only=True, limit=1000)
+        runs = self.list_training_runs(success_only=True, limit=10000)
         updated = 0
 
         for run in runs:
             if run.model_name == baseline_model:
-                continue  # Don't calculate for baseline itself
+                # Set baseline to 0.0 explicitly
+                self.conn.execute(
+                    "UPDATE training_runs SET vs_baseline_pct = 0.0 WHERE run_id = ?",
+                    (run.run_id,)
+                )
+                continue
 
             vs_pct = ((run.perplexity - baseline_ppl) / baseline_ppl) * 100
 
