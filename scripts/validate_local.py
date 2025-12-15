@@ -7,7 +7,6 @@ Catches: syntax errors, import errors, shape mismatches, missing ops.
 
 import argparse
 import sys
-import math
 from pathlib import Path
 
 # Add paths for imports
