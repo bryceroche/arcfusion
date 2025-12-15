@@ -798,6 +798,26 @@ def cmd_validate(args: argparse.Namespace) -> None:
             print(f"\nStored {len(result.benchmarks)} benchmark results")
 
 
+def cmd_export_results(args: argparse.Namespace) -> None:
+    """Export training results from DB to JSON."""
+    import json
+
+    with ArcFusionDB(args.db) as db:
+        # Optionally update vs_baseline_pct first
+        if args.update_baseline:
+            updated = db.update_vs_baseline_pct()
+            print(f"Updated vs_baseline_pct for {updated} runs")
+
+        results = db.export_results_json(baseline_model=args.baseline)
+
+        if args.output:
+            with open(args.output, "w") as f:
+                json.dump(results, f, indent=2, default=str)
+            print(f"Exported {len(results['results'])} results to {args.output}")
+        else:
+            print(json.dumps(results, indent=2, default=str))
+
+
 def main() -> None:
     """
     ArcFusion CLI entry point.
@@ -972,6 +992,17 @@ Examples:
     val_parser.add_argument("--store", action="store_true", help="Store benchmark results in database")
     val_parser.add_argument("--cloud", action="store_true", help="Run training on cloud GPU via Modal")
 
+    # export-results (export training results from DB)
+    export_parser = subparsers.add_parser(
+        "export-results",
+        help="Export training results from DB to JSON",
+        description="Export all training results from the database to JSON format. "
+                    "Can regenerate results files from DB. Optionally updates vs_baseline_pct."
+    )
+    export_parser.add_argument("--output", "-o", help="Output JSON file (prints to stdout if not specified)")
+    export_parser.add_argument("--baseline", "-b", default="Transformer_MHA", help="Baseline model name (default: Transformer_MHA)")
+    export_parser.add_argument("--update-baseline", action="store_true", help="Update vs_baseline_pct for all runs before export")
+
     # web (web UI server)
     web_parser = subparsers.add_parser(
         "web",
@@ -998,6 +1029,7 @@ Examples:
         "config": cmd_config,
         "benchmark": cmd_benchmark,
         "validate": cmd_validate,
+        "export-results": cmd_export_results,
         "web": cmd_web,
     }
 

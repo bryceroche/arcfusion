@@ -1531,6 +1531,111 @@ class ArcFusionDB:
 
         return needed
 
+    def export_results_json(
+        self,
+        baseline_model: str = "Transformer_MHA",
+        include_config: bool = True
+    ) -> dict:
+        """
+        Export training results to JSON format (can regenerate results files).
+
+        Groups runs by model, calculates vs_baseline_pct, includes baseline stats.
+
+        Returns:
+            Dict suitable for JSON serialization with config, baseline, and results.
+        """
+        # Get baseline stats
+        baseline_stats = self.get_baseline_stats(baseline_model)
+        baseline_ppl = baseline_stats["mean_ppl"]
+
+        # Get all successful runs
+        runs = self.list_training_runs(success_only=True, limit=1000)
+
+        # Group by model name, keeping best (lowest ppl) for each
+        best_by_model: dict[str, TrainingRun] = {}
+        for run in runs:
+            if run.model_name not in best_by_model:
+                best_by_model[run.model_name] = run
+            elif run.perplexity < best_by_model[run.model_name].perplexity:
+                best_by_model[run.model_name] = run
+
+        # Build results dict
+        results = {}
+        for model_name, run in best_by_model.items():
+            vs_baseline = 0.0
+            if baseline_ppl > 0 and model_name != baseline_model:
+                vs_baseline = ((run.perplexity - baseline_ppl) / baseline_ppl) * 100
+
+            results[model_name] = {
+                "success": run.success,
+                "model_name": run.model_name,
+                "parameters": run.parameters,
+                "eval_loss": run.eval_loss,
+                "perplexity": run.perplexity,
+                "time_seconds": run.time_seconds,
+                "vs_baseline_pct": vs_baseline,
+                "run_id": run.run_id,
+                "created_at": run.created_at,
+            }
+
+        output = {
+            "baseline_model": baseline_model,
+            "baseline_stats": {
+                "mean_ppl": baseline_stats["mean_ppl"],
+                "std_ppl": baseline_stats["std_ppl"],
+                "n_runs": baseline_stats["n_runs"],
+            },
+            "results": results,
+        }
+
+        # Optionally include config from a baseline run
+        if include_config and baseline_stats["runs"]:
+            br = baseline_stats["runs"][0]
+            output["config"] = {
+                "d_model": br.d_model,
+                "n_layers": br.n_layers,
+                "n_heads": br.n_heads,
+                "vocab_size": br.vocab_size,
+                "batch_size": br.batch_size,
+                "learning_rate": br.learning_rate,
+                "max_steps": br.max_steps,
+                "gpu_type": br.gpu_type,
+                "mixed_precision": br.mixed_precision,
+            }
+
+        return output
+
+    def update_vs_baseline_pct(self, baseline_model: str = "Transformer_MHA") -> int:
+        """
+        Backfill vs_baseline_pct for all runs based on baseline stats.
+
+        Returns:
+            Number of runs updated.
+        """
+        baseline_stats = self.get_baseline_stats(baseline_model)
+        baseline_ppl = baseline_stats["mean_ppl"]
+
+        if baseline_ppl <= 0:
+            return 0
+
+        runs = self.list_training_runs(success_only=True, limit=1000)
+        updated = 0
+
+        for run in runs:
+            if run.model_name == baseline_model:
+                continue  # Don't calculate for baseline itself
+
+            vs_pct = ((run.perplexity - baseline_ppl) / baseline_ppl) * 100
+
+            self.conn.execute(
+                "UPDATE training_runs SET vs_baseline_pct = ? WHERE run_id = ?",
+                (vs_pct, run.run_id)
+            )
+            updated += 1
+
+        self.conn.commit()
+        return updated
+
     # -------------------------------------------------------------------------
     # Experiment operations
     # -------------------------------------------------------------------------
