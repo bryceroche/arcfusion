@@ -578,6 +578,175 @@ class EngineComposer:
 
         return self.sort_by_architecture_order(result)
 
+    def results_aware_compose(
+        self,
+        optimize_for: str = "efficiency",
+        max_components: int = 6,
+        verbose: bool = True
+    ) -> tuple[list['Component'], dict]:
+        """
+        Compose an architecture informed by past benchmark results.
+
+        Acts like an ML researcher studying what worked before:
+        1. Queries past training results from DB
+        2. Identifies winning components for quality vs speed
+        3. Generates informed architecture hypotheses
+        4. Returns components with reasoning metadata
+
+        Args:
+            optimize_for: "quality", "speed", or "efficiency" (default)
+            max_components: Maximum components to include
+            verbose: Print reasoning to stdout
+
+        Returns:
+            (components, reasoning) - Components list and dict with design rationale
+        """
+        # Get performance analysis from DB
+        stats = self.db.get_model_performance_stats()
+
+        reasoning = {
+            "optimize_for": optimize_for,
+            "insights": stats.get("insights", []),
+            "recommendations": stats.get("recommendations", []),
+            "design_choices": [],
+        }
+
+        if not stats.get("rankings") or not stats["rankings"].get("by_quality"):
+            # No data - fall back to greedy
+            if verbose:
+                print("No benchmark data available, using greedy strategy")
+            reasoning["design_choices"].append("Fallback to greedy (no benchmark data)")
+            return self.greedy_compose(max_components=max_components), reasoning
+
+        rankings = stats["rankings"]
+
+        if verbose:
+            print("=== Results-Aware Dream ===")
+            for insight in reasoning["insights"]:
+                print(f"  {insight}")
+            print()
+
+        # Determine target based on optimization goal
+        if optimize_for == "quality":
+            target_models = [m for m, _ in rankings["by_quality"][:2]]
+            reasoning["design_choices"].append(
+                "Optimizing for quality - prioritizing models with best perplexity"
+            )
+        elif optimize_for == "speed":
+            target_models = [m for m, _ in rankings["by_speed"][:2]]
+            reasoning["design_choices"].append(
+                "Optimizing for speed - prioritizing fastest training models"
+            )
+        else:  # efficiency
+            target_models = [m for m, _ in rankings["by_efficiency"][:2]]
+            reasoning["design_choices"].append(
+                "Optimizing for efficiency - balancing quality and speed"
+            )
+
+        if verbose:
+            print(f"Target models: {target_models}")
+
+        # Extract attention types that work well
+        def get_attention_type(name: str) -> str:
+            if "_" in name:
+                return name.split("_")[-1]
+            return name
+
+        good_attention_types = {get_attention_type(m) for m in target_models}
+        reasoning["preferred_attention"] = list(good_attention_types)
+
+        if verbose:
+            print(f"Preferred attention types: {good_attention_types}")
+
+        # Find components that match preferred attention types
+        all_components = self.db.find_components()
+        preferred_attn_comps = []
+        for comp in all_components:
+            cat = get_component_category(comp)
+            if cat == "attention":
+                # Check if component name contains any preferred type
+                name_lower = comp.name.lower()
+                for attn_type in good_attention_types:
+                    if attn_type.lower() in name_lower:
+                        preferred_attn_comps.append(comp)
+                        break
+
+        if verbose:
+            print(f"Found {len(preferred_attn_comps)} attention components matching preference")
+
+        # Start building the architecture
+        engine = []
+        used_ids = set()
+        used_categories = set()
+
+        # 1. Start with position/embedding
+        start_comps = [c for c in all_components if _is_start_component(c)]
+        if start_comps:
+            best_start = max(start_comps, key=lambda c: c.usefulness_score)
+            engine.append(best_start)
+            used_ids.add(best_start.component_id)
+            used_categories.add(get_component_category(best_start))
+            reasoning["design_choices"].append(f"Start: {best_start.name}")
+
+        # 2. Add preferred attention mechanism
+        if preferred_attn_comps:
+            # Pick highest scoring from preferred
+            unused_attn = [c for c in preferred_attn_comps if c.component_id not in used_ids]
+            if unused_attn:
+                best_attn = max(unused_attn, key=lambda c: c.usefulness_score)
+                engine.append(best_attn)
+                used_ids.add(best_attn.component_id)
+                used_categories.add("attention")
+                reasoning["design_choices"].append(
+                    f"Attention: {best_attn.name} (based on {good_attention_types} performance)"
+                )
+        else:
+            # Fall back to highest-scoring attention
+            attn_comps = [c for c in all_components if get_component_category(c) == "attention"]
+            if attn_comps:
+                best_attn = max(attn_comps, key=lambda c: c.usefulness_score)
+                engine.append(best_attn)
+                used_ids.add(best_attn.component_id)
+                used_categories.add("attention")
+                reasoning["design_choices"].append(f"Attention: {best_attn.name} (fallback)")
+
+        # 3. Fill in remaining categories
+        remaining_cats = ["layer", "structure", "efficiency", "output"]
+        for cat in remaining_cats:
+            if len(engine) >= max_components:
+                break
+            if cat in used_categories:
+                continue
+
+            cat_comps = [
+                c for c in all_components
+                if get_component_category(c) == cat
+                and c.component_id not in used_ids
+            ]
+            if cat_comps:
+                best = max(cat_comps, key=lambda c: c.usefulness_score)
+                engine.append(best)
+                used_ids.add(best.component_id)
+                used_categories.add(cat)
+
+        # Sort by architecture order
+        engine = self.sort_by_architecture_order(engine)
+
+        if verbose:
+            print(f"\nDesigned architecture ({len(engine)} components):")
+            for i, comp in enumerate(engine, 1):
+                print(f"  {i}. {comp.name} ({get_component_category(comp)})")
+            print()
+            for choice in reasoning["design_choices"]:
+                print(f"  → {choice}")
+
+        return engine, reasoning
+
+    def _results_aware_wrapper(self, **kwargs) -> list['Component']:
+        """Wrapper for results_aware_compose to return just components for dream()."""
+        components, _reasoning = self.results_aware_compose(**kwargs)
+        return components
+
     def _get_configuration_bonus(self, components: list[Component]) -> float:
         """
         Calculate bonus score based on matching known-good configurations.
@@ -649,6 +818,7 @@ class EngineComposer:
             "random": self.random_walk_compose,
             "mutate": self.mutate,
             "crossover": self.crossover,
+            "results_aware": self._results_aware_wrapper,
         }
 
         if strategy not in strategies:

@@ -1659,6 +1659,108 @@ class ArcFusionDB:
         self.conn.commit()
         return updated
 
+    def get_model_performance_stats(
+        self,
+        baseline_model: str = "Transformer_MHA"
+    ) -> dict:
+        """
+        Get structured analysis of past training results for ML researcher workflow.
+
+        Returns performance analysis with rankings by quality, speed, and efficiency
+        to inform architecture design decisions.
+
+        Returns:
+            Dict with:
+            - rankings: Models ranked by quality, speed, efficiency
+            - insights: Key observations (best quality, best speed, etc.)
+            - recommendations: Suggestions for new architecture designs
+        """
+        results = self.export_results_json(baseline_model=baseline_model, include_config=False)
+
+        if not results.get("results"):
+            return {
+                "rankings": {},
+                "insights": [],
+                "recommendations": ["No training data available. Run baseline benchmarks first."],
+            }
+
+        models = results["results"]
+
+        # Sort by different metrics
+        by_quality = sorted(models.items(), key=lambda x: x[1]["quality_score"], reverse=True)
+        by_speed = sorted(models.items(), key=lambda x: x[1]["speed_score"], reverse=True)
+        by_efficiency = sorted(models.items(), key=lambda x: x[1]["efficiency_score"], reverse=True)
+
+        # Extract attention types from model names (e.g., "Transformer_MHA" -> "MHA")
+        def get_attention_type(name: str) -> str:
+            if "_" in name:
+                return name.split("_")[-1]
+            return name
+
+        # Build insights
+        insights = []
+        if by_quality:
+            best_q = by_quality[0]
+            insights.append(
+                "Best quality: {} ({:.3f}x baseline perplexity)".format(
+                    best_q[0], best_q[1]["quality_score"]
+                )
+            )
+        if by_speed:
+            best_s = by_speed[0]
+            insights.append(
+                "Best speed: {} ({:.3f}x baseline training time)".format(
+                    best_s[0], best_s[1]["speed_score"]
+                )
+            )
+        if by_efficiency:
+            best_e = by_efficiency[0]
+            insights.append(
+                "Best efficiency: {} (quality {:.3f} * speed {:.3f} = {:.3f})".format(
+                    best_e[0], best_e[1]["quality_score"],
+                    best_e[1]["speed_score"], best_e[1]["efficiency_score"]
+                )
+            )
+
+        # Generate recommendations based on patterns
+        recommendations = []
+
+        # Check if there's a quality-speed tradeoff
+        if by_quality and by_speed and by_quality[0][0] != by_speed[0][0]:
+            q_best = get_attention_type(by_quality[0][0])
+            s_best = get_attention_type(by_speed[0][0])
+            recommendations.append(
+                "Consider hybrid: {} for quality + {} for speed".format(q_best, s_best)
+            )
+
+        # Check if hybrid exists and how it performs
+        hybrid_results = [m for m in models.items() if "Hybrid" in m[0]]
+        if hybrid_results:
+            h = hybrid_results[0]
+            if h[1]["quality_score"] > 1.0 and h[1]["speed_score"] < 1.0:
+                recommendations.append(
+                    "Existing hybrid {} has good quality but slow - try fewer SSM layers".format(h[0])
+                )
+
+        # Suggest exploration based on gaps
+        attention_types = {get_attention_type(m) for m in models.keys()}
+        unexplored = {"Linear", "Retention", "RWKV"} - attention_types
+        if unexplored:
+            recommendations.append(
+                "Unexplored attention types: {}".format(", ".join(sorted(unexplored)))
+            )
+
+        return {
+            "rankings": {
+                "by_quality": [(m, d["quality_score"]) for m, d in by_quality],
+                "by_speed": [(m, d["speed_score"]) for m, d in by_speed],
+                "by_efficiency": [(m, d["efficiency_score"]) for m, d in by_efficiency],
+            },
+            "insights": insights,
+            "recommendations": recommendations,
+            "raw_results": models,
+        }
+
     # -------------------------------------------------------------------------
     # Experiment operations
     # -------------------------------------------------------------------------
