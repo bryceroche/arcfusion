@@ -40,3 +40,6 @@ htmlcov/
 other/
 .venv-modal/
 .env
+
+# Model artifacts
+*.pkl
