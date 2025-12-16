@@ -18,6 +18,8 @@ import sys
 import json
 import hashlib
 import random
+import subprocess
+import platform
 from pathlib import Path
 
 # Add both paths for proper imports
@@ -27,6 +29,33 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from cloud_train_fair import CONFIG, app, train_model, save_result_to_db
 from db import ArcFusionDB, DreamCandidate, TrainingInsight
 from surrogate_model import SurrogateModel, ArchFeatures, extract_features, retrain_if_needed
+
+
+def notify(title: str, message: str, sound: bool = True) -> None:
+    """Send a system notification when training completes.
+
+    On macOS: Uses native notification center + optional sound
+    On other platforms: Falls back to terminal bell
+    """
+    # Terminal bell (works everywhere)
+    print('\a', end='', flush=True)
+
+    if platform.system() == 'Darwin':
+        # macOS native notification
+        script = f'display notification "{message}" with title "{title}"'
+        if sound:
+            script += ' sound name "Glass"'
+        try:
+            subprocess.run(['osascript', '-e', script], check=False, capture_output=True)
+        except Exception:
+            pass  # Notification is best-effort
+    elif platform.system() == 'Linux':
+        # Linux: try notify-send if available
+        try:
+            subprocess.run(['notify-send', title, message], check=False, capture_output=True)
+        except Exception:
+            pass
+
 
 # Default baseline PPL when no baseline runs exist
 DEFAULT_BASELINE_PPL = 280.0
@@ -904,6 +933,16 @@ def main():
             print(f"  ✓ {msg}")
         else:
             print(f"  Skipped: {msg}")
+
+    # Send completion notification
+    if results:
+        best = results[0]
+        notify(
+            "ArcFusion Training Complete",
+            f"Trained {len(results)} models. Best: {best['ppl']:.1f} PPL"
+        )
+    else:
+        notify("ArcFusion Training Complete", "No models trained")
 
     print()
 
