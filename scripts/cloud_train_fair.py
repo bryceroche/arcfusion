@@ -3548,6 +3548,7 @@ def generate_auto_insight(
     Returns insight_id if created, None otherwise.
     """
     import json
+    import re
     import uuid
     from datetime import datetime
 
@@ -3555,7 +3556,7 @@ def generate_auto_insight(
     attn_type = "MHA"
     if "MQA" in model_name:
         attn_type = "MQA"
-    elif "GQA4" in model_name or "GQA4" in model_name:
+    elif "GQA4" in model_name:
         attn_type = "GQA4"
     elif "GQA" in model_name:
         attn_type = "GQA"
@@ -3564,7 +3565,6 @@ def generate_auto_insight(
 
     # Extract layer count from model name (e.g., "Transformer_MQA18" -> 18)
     layers = 4  # default
-    import re
     match = re.search(r'(\d+)$', model_name)
     if match:
         layers = int(match.group(1))

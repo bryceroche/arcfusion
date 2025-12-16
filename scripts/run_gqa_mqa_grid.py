@@ -95,9 +95,10 @@ class {model_name}(nn.Module):
     """Transformer with {attn_name} attention ({n_kv_heads} KV heads) and {n_layers} layers"""
     def __init__(self, d_model, vocab_size, n_layers, n_heads):
         super().__init__()
+        # Note: n_layers param ignored - layer count baked in at code generation
         self.embed = nn.Embedding(vocab_size, d_model)
         self.pos = nn.Embedding(2048, d_model)
-        self.blocks = nn.ModuleList([TransformerBlock(d_model, n_heads) for _ in range({n_layers})])
+        self.blocks = nn.ModuleList([TransformerBlock(d_model, n_heads) for _ in range({n_layers})])  # {n_layers} layers
         self.ln = nn.LayerNorm(d_model)
         self.head = nn.Linear(d_model, vocab_size, bias=False)
 
