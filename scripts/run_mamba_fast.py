@@ -80,7 +80,8 @@ def parallel_scan(A, B_x):
 class SelectiveSSMFast(nn.Module):
     """Fast Selective SSM using parallel scan.
 
-    Key optimization: Replace sequential O(L) loop with O(log L) parallel scan.
+    Key optimization: Replace sequential O(L) loop with parallel cumsum/cumprod.
+    Time complexity is still O(L) but depth is O(1) - fully GPU parallelizable.
     """
     def __init__(self, d_model, d_state=16, d_conv=4, expand=2, dropout=0.1):
         super().__init__()
@@ -119,7 +120,7 @@ class SelectiveSSMFast(nn.Module):
             self.A.copy_(-torch.exp(torch.linspace(0, 4, d_state)).unsqueeze(0).expand(self.d_inner, -1))
 
     def forward(self, x):
-        B, L, D = x.shape
+        B, L, _ = x.shape  # Don't shadow self.D
 
         # Input projection: split into main and gate
         xz = self.in_proj(x)
@@ -180,11 +181,12 @@ class MambaBlockFast(nn.Module):
 class Transformer_MambaFast(nn.Module):
     """Fast Mamba using parallel scan SSM.
 
-    Same architecture as Transformer_Mamba but with O(log L) parallel scan
+    Same architecture as Transformer_Mamba but with GPU-parallel cumsum/cumprod
     instead of O(L) sequential loop.
     """
     def __init__(self, d_model, vocab_size, n_layers, n_heads):
         super().__init__()
+        # n_heads unused - Mamba doesn't use attention, but param kept for API compatibility
         self.embed = nn.Embedding(vocab_size, d_model)
         # No positional embedding - SSM captures position implicitly
         self.blocks = nn.ModuleList([MambaBlockFast(d_model, d_state=16) for _ in range(n_layers)])
