@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """ArcFusion Web UI - Database Visualization Dashboard."""
 
+import json
 import sys
 from pathlib import Path
 
@@ -282,14 +283,20 @@ elif page == "💭 Dream Candidates":
         st.subheader("Untrained Candidates (waiting for GPU)")
         candidates = db.list_dream_candidates(untrained_only=True, limit=50)
         if candidates:
+            def parse_components(json_str):
+                try:
+                    comps = json.loads(json_str) if json_str else []
+                    return ', '.join(comps[:5]) + ('...' if len(comps) > 5 else '')
+                except:
+                    return json_str or ''
+
             data = [{
                 'Strategy': c.strategy,
                 'Temp': f"{c.temperature:.2f}",
                 'Predicted PPL': f"{c.predicted_ppl:.1f}" if c.predicted_ppl else 'N/A',
                 'Arch Type': c.arch_type,
                 'Layers': c.n_layers,
-                'Has Mamba': '✅' if c.has_mamba else '❌',
-                'Is Hybrid': '✅' if c.is_hybrid else '❌',
+                'Components': parse_components(c.components_json),
             } for c in candidates]
             st.dataframe(pd.DataFrame(data), use_container_width=True)
             st.write(f"Total: {len(candidates)} untrained candidates")
@@ -300,13 +307,20 @@ elif page == "💭 Dream Candidates":
         st.subheader("Trained Candidates (with results)")
         trained = db.list_dream_candidates(trained_only=True, limit=50)
         if trained:
+            def parse_components_trained(json_str):
+                try:
+                    comps = json.loads(json_str) if json_str else []
+                    return ', '.join(comps[:5]) + ('...' if len(comps) > 5 else '')
+                except:
+                    return json_str or ''
+
             data = [{
                 'Strategy': c.strategy,
                 'Predicted PPL': f"{c.predicted_ppl:.1f}" if c.predicted_ppl else 'N/A',
                 'Actual PPL': f"{c.actual_ppl:.1f}" if c.actual_ppl else 'N/A',
                 'Error': f"{abs(c.predicted_ppl - c.actual_ppl):.1f}" if c.predicted_ppl and c.actual_ppl else 'N/A',
                 'Actual Time': f"{c.actual_time:.1f}s" if c.actual_time else 'N/A',
-                'Arch Type': c.arch_type,
+                'Components': parse_components_trained(c.components_json),
             } for c in trained]
             st.dataframe(pd.DataFrame(data), use_container_width=True)
 
