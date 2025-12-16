@@ -11,6 +11,7 @@ license = {text = "MIT"}
 requires-python = ">=3.10"
 dependencies = [
     "arxiv>=2.0",
+    "python-dotenv>=1.0.0",
 ]
 authors = [
     {name = "Bryce Roche"}

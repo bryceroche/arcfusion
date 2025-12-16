@@ -5,6 +5,12 @@ ArcFusion CLI - Command-line interface.
 import argparse
 import os
 import sys
+
+from dotenv import load_dotenv
+
+# Load .env file from current directory or project root
+load_dotenv()
+
 from . import __version__
 from .db import ArcFusionDB, BenchmarkResult, generate_training_insights
 from .composer import EngineComposer
@@ -263,7 +269,9 @@ def cmd_analyze(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     if not os.environ.get("ANTHROPIC_API_KEY"):
-        print("[ERROR] ANTHROPIC_API_KEY environment variable required")
+        print("[ERROR] ANTHROPIC_API_KEY not set")
+        print("  Set via environment: export ANTHROPIC_API_KEY=sk-ant-...")
+        print("  Or add to .env file: ANTHROPIC_API_KEY=sk-ant-...")
         sys.exit(1)
 
     with ArcFusionDB(args.db) as db:
