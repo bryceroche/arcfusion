@@ -3532,6 +3532,119 @@ def save_result_to_db(db: ArcFusionDB, result: dict, config: dict, baseline_run_
     return db.add_training_run(run)
 
 
+def generate_auto_insight(
+    db: ArcFusionDB,
+    run_id: str,
+    model_name: str,
+    ppl: float,
+    time_s: float,
+    baseline_ppl: float = 0,
+) -> str | None:
+    """Generate automatic insight after a training run.
+
+    Checks if this run is notable (new best, Pareto-optimal, etc.) and
+    creates an insight in the training_insights table if so.
+
+    Returns insight_id if created, None otherwise.
+    """
+    import json
+    import uuid
+    from datetime import datetime
+
+    # Extract architecture info from model name
+    attn_type = "MHA"
+    if "MQA" in model_name:
+        attn_type = "MQA"
+    elif "GQA4" in model_name or "GQA4" in model_name:
+        attn_type = "GQA4"
+    elif "GQA" in model_name:
+        attn_type = "GQA"
+    elif "Mamba" in model_name:
+        attn_type = "Mamba"
+
+    # Extract layer count from model name (e.g., "Transformer_MQA18" -> 18)
+    layers = 4  # default
+    import re
+    match = re.search(r'(\d+)$', model_name)
+    if match:
+        layers = int(match.group(1))
+
+    # Get all successful runs for comparison
+    all_runs = db.list_training_runs(success_only=True, limit=100)
+
+    # Check if this is the best for its attention type
+    same_type_runs = [r for r in all_runs if attn_type in r.model_name and r.run_id != run_id]
+    is_best_in_type = not same_type_runs or ppl < min(r.perplexity for r in same_type_runs)
+
+    # Check if this is overall best
+    is_overall_best = not all_runs or ppl < min(r.perplexity for r in all_runs if r.run_id != run_id)
+
+    # Check if Pareto-optimal (best PPL for its time bucket)
+    time_bucket = int(time_s // 30) * 30  # 30-second buckets
+    similar_time_runs = [r for r in all_runs if abs(r.time_seconds - time_s) < 30 and r.run_id != run_id]
+    is_pareto = not similar_time_runs or ppl < min(r.perplexity for r in similar_time_runs)
+
+    # Generate insight if notable
+    if not (is_best_in_type or is_overall_best or is_pareto):
+        return None
+
+    # Build insight
+    insights = []
+    if is_overall_best:
+        insights.append(f"New overall best: {ppl:.1f} PPL")
+    if is_best_in_type:
+        insights.append(f"Best {attn_type} model: {ppl:.1f} PPL")
+    if is_pareto and not is_overall_best:
+        insights.append(f"Pareto-optimal in ~{time_bucket}-{time_bucket+30}s bucket")
+
+    if baseline_ppl > 0:
+        vs_baseline = ((ppl - baseline_ppl) / baseline_ppl) * 100
+        insights.append(f"vs baseline: {vs_baseline:+.1f}%")
+
+    title = f"Notable result: {model_name}"
+    description = f"{model_name} achieved {ppl:.1f} PPL in {time_s:.0f}s.\n\n" + "\n".join(f"- {i}" for i in insights)
+
+    evidence = {
+        "model_name": model_name,
+        "perplexity": ppl,
+        "time_s": time_s,
+        "layers": layers,
+        "attn_type": attn_type,
+        "is_best_in_type": is_best_in_type,
+        "is_overall_best": is_overall_best,
+        "is_pareto": is_pareto,
+    }
+
+    tags = [attn_type.lower(), f"layers_{layers}"]
+    if is_overall_best:
+        tags.append("best_overall")
+    if is_pareto:
+        tags.append("pareto")
+
+    insight_id = f"insight-{uuid.uuid4().hex[:8]}"
+
+    db.conn.execute("""
+        INSERT INTO training_insights
+        (insight_id, category, title, description, source_run_id, source_comparison,
+         evidence_json, confidence, tags, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        insight_id,
+        "auto_notable_result",
+        title,
+        description,
+        run_id,
+        f"{attn_type} at {layers}L",
+        json.dumps(evidence),
+        0.9,
+        ",".join(tags),
+        datetime.now().isoformat()
+    ))
+    db.conn.commit()
+
+    return insight_id
+
+
 def main():
     import sys
     # Defer db imports to avoid Modal serialization issues

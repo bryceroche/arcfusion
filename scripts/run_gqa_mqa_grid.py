@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src" / "arcfusion"))
 
-from cloud_train_fair import CONFIG, app, train_model, save_result_to_db
+from cloud_train_fair import CONFIG, app, train_model, save_result_to_db, generate_auto_insight
 from db import ArcFusionDB
 
 
@@ -183,6 +183,11 @@ def main():
 
             run_id = save_result_to_db(db, result, CONFIG, baseline_run_id, model_code=code)
             print(f"  Saved: {run_id}")
+
+            # Auto-generate insight if notable
+            insight_id = generate_auto_insight(db, run_id, model_name, ppl, time_s, baseline_ppl)
+            if insight_id:
+                print(f"  Insight: {insight_id}")
 
             results.append({
                 "name": model_name,
