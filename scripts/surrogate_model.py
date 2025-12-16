@@ -104,7 +104,7 @@ def extract_features(model_name: str, n_layers_db: int = 4, d_model: int = 256) 
     has_mamba = 'mamba' in name
     has_linear_attn = 'linear' in name
     is_hybrid = any(x in name for x in ['hybrid', 'sandwich', 'mix', '4to1', '5to1', 'heavy'])
-    is_fast_mamba = 'mambafast' in name or 'fast' in name
+    is_fast_mamba = 'mambafast' in name or 'fastmamba' in name or name.endswith('fast')
 
     return ArchFeatures(
         n_layers=n_layers,
@@ -136,10 +136,13 @@ def load_training_data(db: ArcFusionDB) -> tuple[np.ndarray, np.ndarray, np.ndar
     names = []
 
     for model_name, n_layers_db, d_model, ppl, time_s in runs:
+        # Skip runs with missing time data - they would skew the time model
+        if time_s is None or time_s <= 0:
+            continue
         features = extract_features(model_name, n_layers_db or 4, d_model or 256)
         X.append(features.to_vector())
         y_ppl.append(ppl)
-        y_time.append(time_s or 100.0)  # Default 100s if missing
+        y_time.append(time_s)
         names.append(model_name)
 
     return np.array(X), np.array(y_ppl), np.array(y_time), names
@@ -328,8 +331,8 @@ def update_untrained_candidate_predictions(db: ArcFusionDB, model: SurrogateMode
 
     Returns: Number of candidates updated
     """
-    # Get all untrained candidates
-    candidates = db.list_dream_candidates(untrained_only=True, limit=1000)
+    # Get all untrained candidates (no practical limit)
+    candidates = db.list_dream_candidates(untrained_only=True, limit=100000)
     if not candidates:
         return 0
 
@@ -360,8 +363,8 @@ def update_untrained_candidate_predictions(db: ArcFusionDB, model: SurrogateMode
             if ppl_diff > 0.01 or time_diff > 0.01:
                 db.update_dream_candidate_predictions(cand.candidate_id, pred_ppl, pred_time)
                 updated += 1
-        except Exception:
-            # Skip candidates that can't be predicted (shouldn't happen)
+        except (ValueError, IndexError, TypeError):
+            # Skip candidates with invalid features (malformed data)
             continue
 
     return updated
