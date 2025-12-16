@@ -118,129 +118,208 @@ def extract_features(model_name: str, n_layers_db: int = 4, d_model: int = 256) 
     )
 
 
-def load_training_data(db: ArcFusionDB) -> tuple[np.ndarray, np.ndarray, list[str]]:
-    """Load features and targets from training_runs table."""
+def load_training_data(db: ArcFusionDB) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[str]]:
+    """Load features and targets from training_runs table.
+
+    Returns: (X, y_ppl, y_time, names)
+    """
     runs = db.conn.execute('''
-        SELECT model_name, n_layers, d_model, perplexity
+        SELECT model_name, n_layers, d_model, perplexity, time_seconds
         FROM training_runs
         WHERE success = 1 AND perplexity IS NOT NULL
         ORDER BY created_at
     ''').fetchall()
 
     X = []
-    y = []
+    y_ppl = []
+    y_time = []
     names = []
 
-    for model_name, n_layers_db, d_model, ppl in runs:
+    for model_name, n_layers_db, d_model, ppl, time_s in runs:
         features = extract_features(model_name, n_layers_db or 4, d_model or 256)
         X.append(features.to_vector())
-        y.append(ppl)
+        y_ppl.append(ppl)
+        y_time.append(time_s or 100.0)  # Default 100s if missing
         names.append(model_name)
 
-    return np.array(X), np.array(y), names
+    return np.array(X), np.array(y_ppl), np.array(y_time), names
 
 
 class SurrogateModel:
-    """Simple surrogate model for PPL prediction."""
+    """Surrogate model for PPL and training time prediction."""
 
     def __init__(self):
-        self.weights = None
-        self.bias = None
+        # PPL prediction params
+        self.weights_ppl = None
+        self.mean_y_ppl = None
+        self.std_y_ppl = None
+        # Time prediction params
+        self.weights_time = None
+        self.mean_y_time = None
+        self.std_y_time = None
+        # Shared feature normalization
         self.mean_x = None
         self.std_x = None
+        # Legacy compatibility
+        self.weights = None
+        self.bias = None
         self.mean_y = None
         self.std_y = None
 
-    def fit(self, X: np.ndarray, y: np.ndarray):
-        """Fit linear regression with standardization."""
+    def fit(self, X: np.ndarray, y_ppl: np.ndarray, y_time: np.ndarray = None):
+        """Fit linear regression for PPL and optionally time."""
         # Standardize features
         self.mean_x = X.mean(axis=0)
         self.std_x = X.std(axis=0) + 1e-8
         X_norm = (X - self.mean_x) / self.std_x
-
-        # Standardize target
-        self.mean_y = y.mean()
-        self.std_y = y.std() + 1e-8
-        y_norm = (y - self.mean_y) / self.std_y
-
-        # Add bias term
         X_bias = np.column_stack([np.ones(len(X)), X_norm])
 
-        # Closed-form solution with L2 regularization
+        # L2 regularization matrix
         lambda_reg = 0.1
         I = np.eye(X_bias.shape[1])
         I[0, 0] = 0  # Don't regularize bias
-        self.weights = np.linalg.solve(
-            X_bias.T @ X_bias + lambda_reg * I,
-            X_bias.T @ y_norm
-        )
+        XtX_reg = X_bias.T @ X_bias + lambda_reg * I
+
+        # Fit PPL model
+        self.mean_y_ppl = y_ppl.mean()
+        self.std_y_ppl = y_ppl.std() + 1e-8
+        y_ppl_norm = (y_ppl - self.mean_y_ppl) / self.std_y_ppl
+        self.weights_ppl = np.linalg.solve(XtX_reg, X_bias.T @ y_ppl_norm)
+
+        # Legacy compatibility
+        self.weights = self.weights_ppl
+        self.mean_y = self.mean_y_ppl
+        self.std_y = self.std_y_ppl
+
+        # Fit time model if provided
+        if y_time is not None:
+            self.mean_y_time = y_time.mean()
+            self.std_y_time = y_time.std() + 1e-8
+            y_time_norm = (y_time - self.mean_y_time) / self.std_y_time
+            self.weights_time = np.linalg.solve(XtX_reg, X_bias.T @ y_time_norm)
 
     def predict(self, X: np.ndarray) -> np.ndarray:
+        """Predict PPL from features (legacy compatibility)."""
+        return self.predict_ppl(X)
+
+    def predict_ppl(self, X: np.ndarray) -> np.ndarray:
         """Predict PPL from features."""
         X_norm = (X - self.mean_x) / self.std_x
         X_bias = np.column_stack([np.ones(len(X)), X_norm])
-        y_norm = X_bias @ self.weights
-        return y_norm * self.std_y + self.mean_y
+        y_norm = X_bias @ self.weights_ppl
+        return y_norm * self.std_y_ppl + self.mean_y_ppl
+
+    def predict_time(self, X: np.ndarray) -> np.ndarray:
+        """Predict training time from features."""
+        if self.weights_time is None:
+            raise ValueError("Time model not fitted. Call fit() with y_time parameter.")
+        X_norm = (X - self.mean_x) / self.std_x
+        X_bias = np.column_stack([np.ones(len(X)), X_norm])
+        y_norm = X_bias @ self.weights_time
+        return y_norm * self.std_y_time + self.mean_y_time
+
+    def predict_both(self, X: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Predict both PPL and time. Returns (ppl, time)."""
+        ppl = self.predict_ppl(X)
+        time = self.predict_time(X) if self.weights_time is not None else np.zeros(len(X))
+        return ppl, time
 
     def save(self, path: str):
         """Save model to file."""
         with open(path, 'wb') as f:
             pickle.dump({
-                'weights': self.weights,
-                'bias': self.bias,
+                'weights_ppl': self.weights_ppl,
+                'weights_time': self.weights_time,
                 'mean_x': self.mean_x,
                 'std_x': self.std_x,
-                'mean_y': self.mean_y,
-                'std_y': self.std_y,
+                'mean_y_ppl': self.mean_y_ppl,
+                'std_y_ppl': self.std_y_ppl,
+                'mean_y_time': self.mean_y_time,
+                'std_y_time': self.std_y_time,
+                # Legacy fields
+                'weights': self.weights_ppl,
+                'bias': None,
+                'mean_y': self.mean_y_ppl,
+                'std_y': self.std_y_ppl,
             }, f)
 
     def load(self, path: str):
         """Load model from file."""
         with open(path, 'rb') as f:
             data = pickle.load(f)
-            self.weights = data['weights']
-            self.bias = data['bias']
+            # Try new format first
+            if 'weights_ppl' in data:
+                self.weights_ppl = data['weights_ppl']
+                self.weights_time = data.get('weights_time')
+                self.mean_y_ppl = data['mean_y_ppl']
+                self.std_y_ppl = data['std_y_ppl']
+                self.mean_y_time = data.get('mean_y_time')
+                self.std_y_time = data.get('std_y_time')
+            else:
+                # Legacy format
+                self.weights_ppl = data['weights']
+                self.mean_y_ppl = data['mean_y']
+                self.std_y_ppl = data['std_y']
             self.mean_x = data['mean_x']
             self.std_x = data['std_x']
-            self.mean_y = data['mean_y']
-            self.std_y = data['std_y']
+            # Legacy compatibility
+            self.weights = self.weights_ppl
+            self.mean_y = self.mean_y_ppl
+            self.std_y = self.std_y_ppl
 
 
-def evaluate_model(model: SurrogateModel, X: np.ndarray, y: np.ndarray,
-                   names: list[str], split_ratio: float = 0.8):
-    """Evaluate model with train/test split."""
+def evaluate_model(model: SurrogateModel, X: np.ndarray, y_ppl: np.ndarray,
+                   y_time: np.ndarray, names: list[str], split_ratio: float = 0.8):
+    """Evaluate model with train/test split for both PPL and time."""
     n = len(X)
     n_train = int(n * split_ratio)
 
     # Use chronological split (older data for training)
     X_train, X_test = X[:n_train], X[n_train:]
-    y_train, y_test = y[:n_train], y[n_train:]
+    y_ppl_train, y_ppl_test = y_ppl[:n_train], y_ppl[n_train:]
+    y_time_train, y_time_test = y_time[:n_train], y_time[n_train:]
     names_test = names[n_train:]
 
-    model.fit(X_train, y_train)
+    model.fit(X_train, y_ppl_train, y_time_train)
 
-    # Training metrics
-    y_train_pred = model.predict(X_train)
-    train_mae = np.abs(y_train - y_train_pred).mean()
-    train_rmse = np.sqrt(((y_train - y_train_pred) ** 2).mean())
+    # PPL metrics
+    y_ppl_train_pred = model.predict_ppl(X_train)
+    ppl_train_mae = np.abs(y_ppl_train - y_ppl_train_pred).mean()
+    ppl_train_rmse = np.sqrt(((y_ppl_train - y_ppl_train_pred) ** 2).mean())
 
-    # Test metrics
-    y_test_pred = model.predict(X_test)
-    test_mae = np.abs(y_test - y_test_pred).mean()
-    test_rmse = np.sqrt(((y_test - y_test_pred) ** 2).mean())
+    y_ppl_test_pred = model.predict_ppl(X_test)
+    ppl_test_mae = np.abs(y_ppl_test - y_ppl_test_pred).mean()
+    ppl_test_rmse = np.sqrt(((y_ppl_test - y_ppl_test_pred) ** 2).mean())
+    ppl_corr = np.corrcoef(y_ppl_test, y_ppl_test_pred)[0, 1] if len(y_ppl_test) > 1 else 0
 
-    # Correlation
-    corr = np.corrcoef(y_test, y_test_pred)[0, 1] if len(y_test) > 1 else 0
+    # Time metrics
+    y_time_train_pred = model.predict_time(X_train)
+    time_train_mae = np.abs(y_time_train - y_time_train_pred).mean()
+    time_train_rmse = np.sqrt(((y_time_train - y_time_train_pred) ** 2).mean())
+
+    y_time_test_pred = model.predict_time(X_test)
+    time_test_mae = np.abs(y_time_test - y_time_test_pred).mean()
+    time_test_rmse = np.sqrt(((y_time_test - y_time_test_pred) ** 2).mean())
+    time_corr = np.corrcoef(y_time_test, y_time_test_pred)[0, 1] if len(y_time_test) > 1 else 0
 
     return {
-        'train_mae': train_mae,
-        'train_rmse': train_rmse,
-        'test_mae': test_mae,
-        'test_rmse': test_rmse,
-        'correlation': corr,
+        # PPL metrics
+        'ppl_train_mae': ppl_train_mae,
+        'ppl_train_rmse': ppl_train_rmse,
+        'ppl_test_mae': ppl_test_mae,
+        'ppl_test_rmse': ppl_test_rmse,
+        'ppl_correlation': ppl_corr,
+        # Time metrics
+        'time_train_mae': time_train_mae,
+        'time_train_rmse': time_train_rmse,
+        'time_test_mae': time_test_mae,
+        'time_test_rmse': time_test_rmse,
+        'time_correlation': time_corr,
+        # General
         'n_train': n_train,
         'n_test': n - n_train,
-        'predictions': list(zip(names_test, y_test, y_test_pred)),
+        'ppl_predictions': list(zip(names_test, y_ppl_test, y_ppl_test_pred)),
+        'time_predictions': list(zip(names_test, y_time_test, y_time_test_pred)),
     }
 
 
@@ -254,7 +333,7 @@ def rank_candidates(model: SurrogateModel, candidates: list[ArchFeatures]) -> li
 
 def main():
     print("=" * 60)
-    print("SURROGATE MODEL FOR PPL PREDICTION")
+    print("SURROGATE MODEL FOR PPL AND TIME PREDICTION")
     print("=" * 60)
 
     db_path = Path(__file__).parent.parent / "arcfusion.db"
@@ -262,42 +341,59 @@ def main():
 
     # Load data
     print("\nLoading training data...")
-    X, y, names = load_training_data(db)
+    X, y_ppl, y_time, names = load_training_data(db)
     print(f"  Samples: {len(X)}")
     print(f"  Features: {ArchFeatures.feature_names()}")
-    print(f"  PPL range: {y.min():.1f} - {y.max():.1f}")
+    print(f"  PPL range: {y_ppl.min():.1f} - {y_ppl.max():.1f}")
+    print(f"  Time range: {y_time.min():.1f}s - {y_time.max():.1f}s")
 
     # Train and evaluate
-    print("\nTraining surrogate model...")
+    print("\nTraining surrogate model (dual: PPL + Time)...")
     model = SurrogateModel()
-    results = evaluate_model(model, X, y, names, split_ratio=0.8)
+    results = evaluate_model(model, X, y_ppl, y_time, names, split_ratio=0.8)
 
-    print(f"\nResults:")
-    print(f"  Train MAE: {results['train_mae']:.1f} PPL")
-    print(f"  Train RMSE: {results['train_rmse']:.1f} PPL")
-    print(f"  Test MAE: {results['test_mae']:.1f} PPL")
-    print(f"  Test RMSE: {results['test_rmse']:.1f} PPL")
-    print(f"  Correlation: {results['correlation']:.3f}")
+    print(f"\nPPL Prediction Results:")
+    print(f"  Train MAE: {results['ppl_train_mae']:.1f} PPL")
+    print(f"  Train RMSE: {results['ppl_train_rmse']:.1f} PPL")
+    print(f"  Test MAE: {results['ppl_test_mae']:.1f} PPL")
+    print(f"  Test RMSE: {results['ppl_test_rmse']:.1f} PPL")
+    print(f"  Correlation: {results['ppl_correlation']:.3f}")
+
+    print(f"\nTime Prediction Results:")
+    print(f"  Train MAE: {results['time_train_mae']:.1f}s")
+    print(f"  Train RMSE: {results['time_train_rmse']:.1f}s")
+    print(f"  Test MAE: {results['time_test_mae']:.1f}s")
+    print(f"  Test RMSE: {results['time_test_rmse']:.1f}s")
+    print(f"  Correlation: {results['time_correlation']:.3f}")
 
     print(f"\nTest predictions ({results['n_test']} samples):")
-    print(f"  {'Model':<35} {'Actual':>8} {'Pred':>8} {'Error':>8}")
-    print("  " + "-" * 60)
-    for name, actual, pred in results['predictions']:
-        error = pred - actual
-        print(f"  {name:<35} {actual:>8.1f} {pred:>8.1f} {error:>+8.1f}")
+    print(f"  {'Model':<30} {'PPL Act':>7} {'PPL Pred':>8} {'Time Act':>8} {'Time Pred':>9}")
+    print("  " + "-" * 70)
+    # Combine PPL and time predictions
+    ppl_preds = {name: (actual, pred) for name, actual, pred in results['ppl_predictions']}
+    for name, time_actual, time_pred in results['time_predictions']:
+        ppl_actual, ppl_pred = ppl_preds.get(name, (0, 0))
+        print(f"  {name:<30} {ppl_actual:>7.1f} {ppl_pred:>8.1f} {time_actual:>8.1f}s {time_pred:>8.1f}s")
 
     # Save model
     model_path = Path(__file__).parent.parent / "surrogate_model.pkl"
-    model.fit(X, y)  # Retrain on all data
+    model.fit(X, y_ppl, y_time)  # Retrain on all data
     model.save(str(model_path))
     print(f"\nModel saved to: {model_path}")
 
-    # Feature importance (coefficient magnitudes)
-    print("\nFeature importance (|coefficient|):")
-    coefs = model.weights[1:]  # Skip bias
+    # Feature importance for PPL
+    print("\nPPL Feature importance (|coefficient|):")
+    coefs_ppl = model.weights_ppl[1:]  # Skip bias
     feature_names = ArchFeatures.feature_names()
-    importance = sorted(zip(feature_names, np.abs(coefs)), key=lambda x: -x[1])
-    for name, imp in importance:
+    importance_ppl = sorted(zip(feature_names, np.abs(coefs_ppl)), key=lambda x: -x[1])
+    for name, imp in importance_ppl:
+        print(f"  {name:<20} {imp:.3f}")
+
+    # Feature importance for Time
+    print("\nTime Feature importance (|coefficient|):")
+    coefs_time = model.weights_time[1:]  # Skip bias
+    importance_time = sorted(zip(feature_names, np.abs(coefs_time)), key=lambda x: -x[1])
+    for name, imp in importance_time:
         print(f"  {name:<20} {imp:.3f}")
 
     # Example: predict on new candidates
@@ -313,14 +409,18 @@ def main():
         ArchFeatures(n_layers=16, n_kv_heads=0, has_mamba=True, has_linear_attn=False, is_hybrid=False, is_fast_mamba=True),
     ]
 
-    ranked = rank_candidates(model, candidates)
-    print(f"\n{'Architecture':<40} {'Pred PPL':>10}")
-    print("-" * 52)
-    for arch, ppl in ranked:
+    X_cand = np.array([c.to_vector() for c in candidates])
+    ppl_preds, time_preds = model.predict_both(X_cand)
+
+    print(f"\n{'Architecture':<35} {'Pred PPL':>10} {'Pred Time':>12}")
+    print("-" * 60)
+    # Sort by PPL
+    ranked = sorted(zip(candidates, ppl_preds, time_preds), key=lambda x: x[1])
+    for arch, ppl, time in ranked:
         desc = f"L={arch.n_layers}, KV={arch.n_kv_heads}"
         if arch.has_mamba:
             desc += ", Mamba"
-        print(f"{desc:<40} {ppl:>10.1f}")
+        print(f"{desc:<35} {ppl:>10.1f} {time:>10.1f}s")
 
 
 if __name__ == "__main__":

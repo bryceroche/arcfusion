@@ -197,6 +197,45 @@ class RecipeAdjustment:
 
 
 @dataclass
+class DreamCandidate:
+    """
+    A candidate architecture from the dream pipeline with surrogate predictions.
+
+    Stores all dreamed architectures (even those not trained) to:
+    - Avoid re-dreaming identical architectures
+    - Track surrogate model accuracy over time
+    - Guide future dreaming with historical data
+    """
+    strategy: str  # greedy, random, crossover, mutate
+    temperature: float = 0.0  # Temperature used for dreaming
+    components_json: str = ""  # JSON list of component names
+    # Architecture features for surrogate model
+    n_layers: int = 4
+    n_kv_heads: int = 8
+    has_mamba: bool = False
+    has_linear_attn: bool = False
+    is_hybrid: bool = False
+    arch_type: str = ""  # gqa, mha, mamba, linear, etc.
+    # Surrogate predictions
+    predicted_ppl: float = 0.0
+    predicted_time: float = 0.0
+    # Training results (if trained)
+    was_trained: bool = False
+    training_run_id: str = ""  # Links to training_runs if trained
+    actual_ppl: float = 0.0
+    actual_time: float = 0.0
+    # Metadata
+    notes: str = ""
+    candidate_id: str = ""
+    created_at: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.candidate_id:
+            content = f"{self.strategy}{self.temperature}{self.components_json}{self.n_layers}"
+            self.candidate_id = hashlib.sha256(content.encode()).hexdigest()[:12]
+
+
+@dataclass
 class TrainingRun:
     """
     Records a complete training run with hardware, config, and results.
@@ -615,6 +654,33 @@ class ArcFusionDB:
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
 
+            -- Dream candidates: all architectures dreamed with surrogate scores
+            CREATE TABLE IF NOT EXISTS dream_candidates (
+                candidate_id TEXT PRIMARY KEY,
+                strategy TEXT NOT NULL,  -- greedy, random, crossover, mutate
+                temperature REAL DEFAULT 0.0,
+                components_json TEXT,  -- JSON list of component names
+                -- Architecture features
+                n_layers INTEGER DEFAULT 4,
+                n_kv_heads INTEGER DEFAULT 8,
+                has_mamba INTEGER DEFAULT 0,
+                has_linear_attn INTEGER DEFAULT 0,
+                is_hybrid INTEGER DEFAULT 0,
+                arch_type TEXT,  -- gqa, mha, mamba, linear, etc.
+                -- Surrogate predictions
+                predicted_ppl REAL DEFAULT 0.0,
+                predicted_time REAL DEFAULT 0.0,
+                -- Training results (if trained)
+                was_trained INTEGER DEFAULT 0,
+                training_run_id TEXT,  -- Links to training_runs if trained
+                actual_ppl REAL DEFAULT 0.0,
+                actual_time REAL DEFAULT 0.0,
+                -- Metadata
+                notes TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (training_run_id) REFERENCES training_runs(run_id)
+            );
+
             -- Indexes
             CREATE INDEX IF NOT EXISTS idx_comp_usefulness ON components(usefulness_score DESC);
             CREATE INDEX IF NOT EXISTS idx_comp_complexity ON components(time_complexity);
@@ -658,6 +724,12 @@ class ArcFusionDB:
             CREATE INDEX IF NOT EXISTS idx_summary_type ON summaries(summary_type);
             CREATE INDEX IF NOT EXISTS idx_summary_source ON summaries(source_ref);
             CREATE INDEX IF NOT EXISTS idx_summary_created ON summaries(created_at DESC);
+            -- Dream candidate indexes
+            CREATE INDEX IF NOT EXISTS idx_dream_cand_strategy ON dream_candidates(strategy);
+            CREATE INDEX IF NOT EXISTS idx_dream_cand_ppl ON dream_candidates(predicted_ppl);
+            CREATE INDEX IF NOT EXISTS idx_dream_cand_trained ON dream_candidates(was_trained);
+            CREATE INDEX IF NOT EXISTS idx_dream_cand_arch ON dream_candidates(arch_type);
+            CREATE INDEX IF NOT EXISTS idx_dream_cand_created ON dream_candidates(created_at DESC);
         """)
         self.conn.commit()
 
@@ -2279,6 +2351,156 @@ class ArcFusionDB:
         return [(r['partner_id'], r['aggregate_score'], r['sample_count']) for r in rows]
 
     # -------------------------------------------------------------------------
+    # Dream candidate operations
+    # -------------------------------------------------------------------------
+    def add_dream_candidate(self, candidate: DreamCandidate) -> str:
+        """Add a new dream candidate with surrogate predictions."""
+        now = datetime.now(timezone.utc).isoformat()
+        if not candidate.created_at:
+            candidate.created_at = now
+
+        self.conn.execute("""
+            INSERT INTO dream_candidates (
+                candidate_id, strategy, temperature, components_json,
+                n_layers, n_kv_heads, has_mamba, has_linear_attn, is_hybrid, arch_type,
+                predicted_ppl, predicted_time,
+                was_trained, training_run_id, actual_ppl, actual_time,
+                notes, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            candidate.candidate_id,
+            candidate.strategy,
+            candidate.temperature,
+            candidate.components_json,
+            candidate.n_layers,
+            candidate.n_kv_heads,
+            _bool_to_int(candidate.has_mamba),
+            _bool_to_int(candidate.has_linear_attn),
+            _bool_to_int(candidate.is_hybrid),
+            candidate.arch_type,
+            candidate.predicted_ppl,
+            candidate.predicted_time,
+            _bool_to_int(candidate.was_trained),
+            candidate.training_run_id or None,
+            candidate.actual_ppl,
+            candidate.actual_time,
+            candidate.notes,
+            candidate.created_at
+        ))
+        self.conn.commit()
+        return candidate.candidate_id
+
+    def get_dream_candidate(self, candidate_id: str) -> DreamCandidate | None:
+        """Get a dream candidate by ID."""
+        row = self.conn.execute(
+            "SELECT * FROM dream_candidates WHERE candidate_id = ?",
+            (candidate_id,)
+        ).fetchone()
+        if not row:
+            return None
+        return DreamCandidate(
+            strategy=row['strategy'],
+            temperature=row['temperature'],
+            components_json=row['components_json'] or "",
+            n_layers=row['n_layers'],
+            n_kv_heads=row['n_kv_heads'],
+            has_mamba=bool(row['has_mamba']),
+            has_linear_attn=bool(row['has_linear_attn']),
+            is_hybrid=bool(row['is_hybrid']),
+            arch_type=row['arch_type'] or "",
+            predicted_ppl=row['predicted_ppl'],
+            predicted_time=row['predicted_time'],
+            was_trained=bool(row['was_trained']),
+            training_run_id=row['training_run_id'] or "",
+            actual_ppl=row['actual_ppl'],
+            actual_time=row['actual_time'],
+            notes=row['notes'] or "",
+            candidate_id=row['candidate_id'],
+            created_at=row['created_at'] or ""
+        )
+
+    def update_dream_candidate_training(
+        self,
+        candidate_id: str,
+        training_run_id: str,
+        actual_ppl: float,
+        actual_time: float
+    ) -> None:
+        """Update a dream candidate with actual training results."""
+        self.conn.execute("""
+            UPDATE dream_candidates
+            SET was_trained = 1, training_run_id = ?, actual_ppl = ?, actual_time = ?
+            WHERE candidate_id = ?
+        """, (training_run_id, actual_ppl, actual_time, candidate_id))
+        self.conn.commit()
+
+    def list_dream_candidates(
+        self,
+        trained_only: bool = False,
+        untrained_only: bool = False,
+        arch_type: str | None = None,
+        limit: int = 100
+    ) -> list[DreamCandidate]:
+        """List dream candidates with optional filters."""
+        query = "SELECT * FROM dream_candidates WHERE 1=1"
+        params = []
+
+        if trained_only:
+            query += " AND was_trained = 1"
+        if untrained_only:
+            query += " AND was_trained = 0"
+        if arch_type:
+            query += " AND arch_type = ?"
+            params.append(arch_type)
+
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+
+        rows = self.conn.execute(query, params).fetchall()
+        return [DreamCandidate(
+            strategy=r['strategy'],
+            temperature=r['temperature'],
+            components_json=r['components_json'] or "",
+            n_layers=r['n_layers'],
+            n_kv_heads=r['n_kv_heads'],
+            has_mamba=bool(r['has_mamba']),
+            has_linear_attn=bool(r['has_linear_attn']),
+            is_hybrid=bool(r['is_hybrid']),
+            arch_type=r['arch_type'] or "",
+            predicted_ppl=r['predicted_ppl'],
+            predicted_time=r['predicted_time'],
+            was_trained=bool(r['was_trained']),
+            training_run_id=r['training_run_id'] or "",
+            actual_ppl=r['actual_ppl'],
+            actual_time=r['actual_time'],
+            notes=r['notes'] or "",
+            candidate_id=r['candidate_id'],
+            created_at=r['created_at'] or ""
+        ) for r in rows]
+
+    def get_surrogate_accuracy(self) -> dict:
+        """Calculate surrogate model accuracy on trained candidates."""
+        rows = self.conn.execute("""
+            SELECT predicted_ppl, actual_ppl, predicted_time, actual_time
+            FROM dream_candidates
+            WHERE was_trained = 1 AND actual_ppl > 0
+        """).fetchall()
+
+        if not rows:
+            return {"n_samples": 0}
+
+        ppl_errors = [abs(r['predicted_ppl'] - r['actual_ppl']) for r in rows]
+        time_errors = [abs(r['predicted_time'] - r['actual_time']) for r in rows]
+
+        return {
+            "n_samples": len(rows),
+            "ppl_mae": sum(ppl_errors) / len(ppl_errors),
+            "time_mae": sum(time_errors) / len(time_errors),
+            "ppl_max_error": max(ppl_errors),
+            "time_max_error": max(time_errors),
+        }
+
+    # -------------------------------------------------------------------------
     # Statistics
     # -------------------------------------------------------------------------
     def stats(self) -> dict:
@@ -2303,6 +2525,8 @@ class ArcFusionDB:
             'experiments_completed': self.conn.execute("SELECT COUNT(*) FROM experiments WHERE status = 'completed'").fetchone()[0],
             'findings': self.conn.execute("SELECT COUNT(*) FROM findings").fetchone()[0],
             'training_insights': self.conn.execute("SELECT COUNT(*) FROM training_insights").fetchone()[0],
+            'dream_candidates': self.conn.execute("SELECT COUNT(*) FROM dream_candidates").fetchone()[0],
+            'dream_candidates_trained': self.conn.execute("SELECT COUNT(*) FROM dream_candidates WHERE was_trained = 1").fetchone()[0],
         }
 
     def close(self):
