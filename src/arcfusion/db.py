@@ -13,6 +13,7 @@ Tables:
 import sqlite3
 import json
 import hashlib
+import functools
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -239,36 +240,41 @@ class DreamCandidate:
         except (json.JSONDecodeError, TypeError):
             return []
 
+    @functools.cached_property
+    def _components_str(self) -> str:
+        """Cached lowercase string of all components for pattern matching."""
+        return ' '.join(self.get_components()).lower()
+
     @property
     def has_mamba(self) -> bool:
         """Check if architecture contains Mamba/SSM components."""
-        comps = ' '.join(self.get_components()).lower()
-        return any(x in comps for x in ['mamba', 'ssm', 's4', 'state space', 'selective'])
+        return any(x in self._components_str for x in ['mamba', 'ssm', 's4', 'state space', 'selective'])
 
     @property
     def has_linear_attn(self) -> bool:
         """Check if architecture contains linear attention."""
-        comps = ' '.join(self.get_components()).lower()
-        return 'linear' in comps and 'attention' in comps
+        return 'linear' in self._components_str and 'attention' in self._components_str
 
     @property
     def is_hybrid(self) -> bool:
         """Check if architecture is a hybrid (has both attention and SSM)."""
-        comps = ' '.join(self.get_components()).lower()
-        has_attn = 'attention' in comps
-        has_ssm = any(x in comps for x in ['mamba', 'ssm', 's4'])
+        has_attn = 'attention' in self._components_str
+        has_ssm = any(x in self._components_str for x in ['mamba', 'ssm', 's4'])
         return has_attn and has_ssm
 
     @property
     def arch_type(self) -> str:
-        """Derive architecture type from components and n_kv_heads."""
+        """Derive architecture type from components and n_kv_heads.
+
+        Returns: mamba, linear, mqa, gqa, or mha (default, assumes 8 heads)
+        """
         if self.has_mamba and not self.is_hybrid:
             return 'mamba'
         if self.has_linear_attn:
             return 'linear'
         if self.n_kv_heads == 1:
             return 'mqa'
-        if self.n_kv_heads < 8:
+        if self.n_kv_heads < 8:  # Less than full MHA (8 heads)
             return 'gqa'
         return 'mha'
 
