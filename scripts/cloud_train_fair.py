@@ -7,7 +7,8 @@ Run with: .venv-modal/bin/python scripts/cloud_train_fair.py
 
 Features:
 - Mixed precision (FP16) for ~2x speedup on tensor cores
-- A10G GPU (faster than T4, good FP16 performance)
+- A100 GPU for fast experiments
+- Persistent Volume cache for WikiText-2 dataset (faster startup)
 - Baseline caching: trains vanilla Transformer once, reuses result
 - Results saved to arcfusion.db training_runs table
 """
@@ -23,13 +24,13 @@ from datetime import datetime
 
 app = modal.App("arcfusion-fair-compare")
 
+# Persistent volume for HuggingFace dataset cache (faster than image caching)
+hf_cache = modal.Volume.from_name("arcfusion-hf-cache", create_if_missing=True)
+
 image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install("torch>=2.0", "numpy", "datasets", "tiktoken")
-    # Pre-cache WikiText-2 during image build to avoid runtime download timeouts
-    .run_commands(
-        'python -c "from datasets import load_dataset; load_dataset(\'wikitext\', \'wikitext-2-raw-v1\', trust_remote_code=True)"'
-    )
+    .env({"HF_HOME": "/cache/huggingface"})
 )
 
 # Training configuration
@@ -56,7 +57,12 @@ BASELINE_TARGET_RUNS = 3  # How many baseline runs to average
 BASELINE_SEEDS = [42, 123, 456]  # Seeds for baseline runs
 
 
-@app.function(image=image, gpu="A100", timeout=1800)
+@app.function(
+    image=image,
+    gpu="A100",
+    timeout=1800,
+    volumes={"/cache": hf_cache}
+)
 def train_model(code: str, model_name: str, config: dict) -> dict:
     """Train model on A100 GPU (fast experiments)."""
     import time
@@ -96,6 +102,7 @@ def train_model(code: str, model_name: str, config: dict) -> dict:
     try:
         print(f"Loading WikiText-2 dataset (seed={seed})...")
         ds = load_dataset("wikitext", "wikitext-2-raw-v1")
+        hf_cache.commit()  # Persist dataset cache to volume
         enc = tiktoken.get_encoding("gpt2")
 
         def tokenize_split(split_name):
