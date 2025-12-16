@@ -602,9 +602,28 @@ def dreamed_to_arch_features(components: list, n_layers: int = 10) -> ArchFeatur
     )
 
 
+def compute_efficiency(ppl: float, time_s: float, baseline_time: float = 300.0) -> float:
+    """Compute efficiency score: PPL × √(time/baseline).
+
+    Lower is better. Balances quality (PPL) with speed (time).
+    A model with 2x the PPL but 4x faster has the same efficiency.
+    """
+    if time_s <= 0:
+        return ppl  # Fall back to PPL if no time prediction
+    return ppl * (time_s / baseline_time) ** 0.5
+
+
 def screen_candidates_with_surrogate(candidates: list, n_layers: int,
-                                      surrogate: SurrogateModel, top_k: int = 3) -> tuple[list, list]:
+                                      surrogate: SurrogateModel, top_k: int = 3,
+                                      screen_by: str = "efficiency") -> tuple[list, list]:
     """Screen candidates using surrogate model.
+
+    Args:
+        candidates: List of (components, strategy, temperature)
+        n_layers: Number of layers
+        surrogate: Trained surrogate model
+        top_k: Number of top candidates to return
+        screen_by: Ranking method - "ppl", "efficiency", or "time"
 
     Returns: (top_k_candidates, all_candidates_with_predictions)
     """
@@ -628,8 +647,13 @@ def screen_candidates_with_surrogate(candidates: list, n_layers: int,
     all_with_preds = [(f[0], f[1], f[2], f[3], ppl, time)
                        for f, ppl, time in zip(features_list, pred_ppl, pred_time)]
 
-    # Rank by predicted PPL (lower is better)
-    ranked = sorted(all_with_preds, key=lambda x: x[4])
+    # Rank by selected criterion (lower is better for all)
+    if screen_by == "ppl":
+        ranked = sorted(all_with_preds, key=lambda x: x[4])
+    elif screen_by == "time":
+        ranked = sorted(all_with_preds, key=lambda x: x[5])
+    else:  # efficiency (default)
+        ranked = sorted(all_with_preds, key=lambda x: compute_efficiency(x[4], x[5]))
 
     # Return top_k and all
     top_k_cands = [(c[0], c[1], c[2], c[4]) for c in ranked[:top_k]]  # components, strategy, temp, pred_ppl
@@ -776,12 +800,16 @@ def main():
         print("=" * 70)
 
         screened, all_candidates_with_preds = screen_candidates_with_surrogate(
-            candidates, n_layers, surrogate, top_k=n_to_train)
+            candidates, n_layers, surrogate, top_k=n_to_train, screen_by="efficiency")
 
-        print(f"\nTop {len(screened)} candidates by predicted PPL:")
+        print(f"\nTop {len(screened)} candidates by predicted efficiency (PPL × √(time/300s)):")
         for i, (components, strategy, temp, pred_ppl) in enumerate(screened):
+            # Find the full prediction for this candidate
+            pred_time = next((c[5] for c in all_candidates_with_preds
+                            if c[1] == strategy and c[2] == temp), 0)
+            eff = compute_efficiency(pred_ppl, pred_time)
             comp_names = [c.name for c in components[:3]]
-            print(f"  {i+1}. {strategy} (t={temp:.2f}): pred={pred_ppl:.1f} PPL - {comp_names}...")
+            print(f"  {i+1}. {strategy} (t={temp:.2f}): eff={eff:.1f} (ppl={pred_ppl:.1f}, time={pred_time:.0f}s) - {comp_names}...")
 
         # Save ALL candidates to DB (with predictions)
         selected_indices = set(range(n_to_train))  # Top k are selected
