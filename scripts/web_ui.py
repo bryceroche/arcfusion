@@ -130,7 +130,7 @@ elif page == "🧩 Components":
         min_score = st.slider("Min usefulness score", 0.0, 1.0, 0.0, 0.1)
 
     # Get components
-    components = db.find_components(query=search if search else None, min_score=min_score)
+    components = db.find_components(name_pattern=search if search else None, min_score=min_score)
 
     # Add category info
     comp_data = []
