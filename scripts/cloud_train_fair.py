@@ -2995,6 +2995,468 @@ class Transformer_MHA18(nn.Module):
         for block in self.blocks: x = block(x)
         return self.head(self.ln_f(x))
 ''',
+
+    # ========== DEEP SCALING (24, 32, 40, 48 layers) ==========
+
+    "Transformer_MHA24": '''
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class MHA(nn.Module):
+    def __init__(self, d_model, n_heads, dropout=0.1):
+        super().__init__()
+        self.n_heads = n_heads
+        self.head_dim = d_model // n_heads
+        self.scale = self.head_dim ** -0.5
+        self.qkv = nn.Linear(d_model, 3 * d_model)
+        self.out = nn.Linear(d_model, d_model)
+        self.dropout = nn.Dropout(dropout)
+    def forward(self, x):
+        B, N, C = x.shape
+        qkv = self.qkv(x).reshape(B, N, 3, self.n_heads, self.head_dim).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv[0], qkv[1], qkv[2]
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+        mask = torch.triu(torch.ones(N, N, device=x.device), diagonal=1).bool()
+        attn = attn.masked_fill(mask, float('-inf'))
+        attn = F.softmax(attn, dim=-1)
+        attn = self.dropout(attn)
+        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
+        return self.out(x)
+
+class MHABlock(nn.Module):
+    def __init__(self, d_model, n_heads):
+        super().__init__()
+        self.ln1 = nn.LayerNorm(d_model)
+        self.attn = MHA(d_model, n_heads)
+        self.ln2 = nn.LayerNorm(d_model)
+        self.ffn = nn.Sequential(nn.Linear(d_model, d_model * 4), nn.GELU(), nn.Linear(d_model * 4, d_model), nn.Dropout(0.1))
+    def forward(self, x):
+        x = x + self.attn(self.ln1(x))
+        x = x + self.ffn(self.ln2(x))
+        return x
+
+class Transformer_MHA24(nn.Module):
+    """MHA24: 24-layer pure MHA for deep scaling comparison."""
+    def __init__(self, d_model=256, vocab_size=8000, n_layers=4, n_heads=8):
+        super().__init__()
+        self.embed = nn.Embedding(vocab_size, d_model)
+        self.pos = nn.Embedding(5000, d_model)
+        self.blocks = nn.ModuleList([MHABlock(d_model, n_heads) for _ in range(24)])
+        self.ln_f = nn.LayerNorm(d_model)
+        self.head = nn.Linear(d_model, vocab_size)
+    def forward(self, x):
+        B, T = x.shape
+        x = self.embed(x) + self.pos(torch.arange(T, device=x.device))
+        for block in self.blocks: x = block(x)
+        return self.head(self.ln_f(x))
+''',
+
+    "Transformer_DeepGQA24": '''
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class GQA(nn.Module):
+    def __init__(self, d_model, n_heads, n_kv_heads=2, dropout=0.1):
+        super().__init__()
+        self.n_heads = n_heads
+        self.n_kv_heads = n_kv_heads
+        self.head_dim = d_model // n_heads
+        self.scale = self.head_dim ** -0.5
+        self.q_proj = nn.Linear(d_model, d_model)
+        self.k_proj = nn.Linear(d_model, n_kv_heads * self.head_dim)
+        self.v_proj = nn.Linear(d_model, n_kv_heads * self.head_dim)
+        self.out = nn.Linear(d_model, d_model)
+        self.dropout = nn.Dropout(dropout)
+    def forward(self, x):
+        B, N, C = x.shape
+        q = self.q_proj(x).reshape(B, N, self.n_heads, self.head_dim).transpose(1, 2).contiguous()
+        k = self.k_proj(x).reshape(B, N, self.n_kv_heads, self.head_dim).transpose(1, 2).contiguous()
+        v = self.v_proj(x).reshape(B, N, self.n_kv_heads, self.head_dim).transpose(1, 2).contiguous()
+        n_rep = self.n_heads // self.n_kv_heads
+        k = k.repeat_interleave(n_rep, dim=1).contiguous()
+        v = v.repeat_interleave(n_rep, dim=1).contiguous()
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+        mask = torch.triu(torch.ones(N, N, device=x.device), diagonal=1).bool()
+        attn = attn.masked_fill(mask, float('-inf'))
+        attn = F.softmax(attn, dim=-1)
+        attn = self.dropout(attn)
+        x = (attn @ v).transpose(1, 2).contiguous().reshape(B, N, C)
+        return self.out(x)
+
+class GQABlock(nn.Module):
+    def __init__(self, d_model, n_heads):
+        super().__init__()
+        self.ln1 = nn.LayerNorm(d_model)
+        self.attn = GQA(d_model, n_heads, n_kv_heads=2)
+        self.ln2 = nn.LayerNorm(d_model)
+        self.ffn = nn.Sequential(nn.Linear(d_model, d_model * 4), nn.GELU(), nn.Linear(d_model * 4, d_model), nn.Dropout(0.1))
+    def forward(self, x):
+        x = x + self.attn(self.ln1(x))
+        x = x + self.ffn(self.ln2(x))
+        return x
+
+class Transformer_DeepGQA24(nn.Module):
+    """DeepGQA24: 24-layer pure GQA for deep scaling comparison."""
+    def __init__(self, d_model=256, vocab_size=8000, n_layers=4, n_heads=8):
+        super().__init__()
+        self.embed = nn.Embedding(vocab_size, d_model)
+        self.pos = nn.Embedding(5000, d_model)
+        self.blocks = nn.ModuleList([GQABlock(d_model, n_heads) for _ in range(24)])
+        self.ln_f = nn.LayerNorm(d_model)
+        self.head = nn.Linear(d_model, vocab_size)
+    def forward(self, x):
+        B, T = x.shape
+        x = self.embed(x) + self.pos(torch.arange(T, device=x.device))
+        for block in self.blocks: x = block(x)
+        return self.head(self.ln_f(x))
+''',
+
+    "Transformer_MHA32": '''
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class MHA(nn.Module):
+    def __init__(self, d_model, n_heads, dropout=0.1):
+        super().__init__()
+        self.n_heads = n_heads
+        self.head_dim = d_model // n_heads
+        self.scale = self.head_dim ** -0.5
+        self.qkv = nn.Linear(d_model, 3 * d_model)
+        self.out = nn.Linear(d_model, d_model)
+        self.dropout = nn.Dropout(dropout)
+    def forward(self, x):
+        B, N, C = x.shape
+        qkv = self.qkv(x).reshape(B, N, 3, self.n_heads, self.head_dim).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv[0], qkv[1], qkv[2]
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+        mask = torch.triu(torch.ones(N, N, device=x.device), diagonal=1).bool()
+        attn = attn.masked_fill(mask, float('-inf'))
+        attn = F.softmax(attn, dim=-1)
+        attn = self.dropout(attn)
+        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
+        return self.out(x)
+
+class MHABlock(nn.Module):
+    def __init__(self, d_model, n_heads):
+        super().__init__()
+        self.ln1 = nn.LayerNorm(d_model)
+        self.attn = MHA(d_model, n_heads)
+        self.ln2 = nn.LayerNorm(d_model)
+        self.ffn = nn.Sequential(nn.Linear(d_model, d_model * 4), nn.GELU(), nn.Linear(d_model * 4, d_model), nn.Dropout(0.1))
+    def forward(self, x):
+        x = x + self.attn(self.ln1(x))
+        x = x + self.ffn(self.ln2(x))
+        return x
+
+class Transformer_MHA32(nn.Module):
+    """MHA32: 32-layer pure MHA for deep scaling comparison."""
+    def __init__(self, d_model=256, vocab_size=8000, n_layers=4, n_heads=8):
+        super().__init__()
+        self.embed = nn.Embedding(vocab_size, d_model)
+        self.pos = nn.Embedding(5000, d_model)
+        self.blocks = nn.ModuleList([MHABlock(d_model, n_heads) for _ in range(32)])
+        self.ln_f = nn.LayerNorm(d_model)
+        self.head = nn.Linear(d_model, vocab_size)
+    def forward(self, x):
+        B, T = x.shape
+        x = self.embed(x) + self.pos(torch.arange(T, device=x.device))
+        for block in self.blocks: x = block(x)
+        return self.head(self.ln_f(x))
+''',
+
+    "Transformer_DeepGQA32": '''
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class GQA(nn.Module):
+    def __init__(self, d_model, n_heads, n_kv_heads=2, dropout=0.1):
+        super().__init__()
+        self.n_heads = n_heads
+        self.n_kv_heads = n_kv_heads
+        self.head_dim = d_model // n_heads
+        self.scale = self.head_dim ** -0.5
+        self.q_proj = nn.Linear(d_model, d_model)
+        self.k_proj = nn.Linear(d_model, n_kv_heads * self.head_dim)
+        self.v_proj = nn.Linear(d_model, n_kv_heads * self.head_dim)
+        self.out = nn.Linear(d_model, d_model)
+        self.dropout = nn.Dropout(dropout)
+    def forward(self, x):
+        B, N, C = x.shape
+        q = self.q_proj(x).reshape(B, N, self.n_heads, self.head_dim).transpose(1, 2).contiguous()
+        k = self.k_proj(x).reshape(B, N, self.n_kv_heads, self.head_dim).transpose(1, 2).contiguous()
+        v = self.v_proj(x).reshape(B, N, self.n_kv_heads, self.head_dim).transpose(1, 2).contiguous()
+        n_rep = self.n_heads // self.n_kv_heads
+        k = k.repeat_interleave(n_rep, dim=1).contiguous()
+        v = v.repeat_interleave(n_rep, dim=1).contiguous()
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+        mask = torch.triu(torch.ones(N, N, device=x.device), diagonal=1).bool()
+        attn = attn.masked_fill(mask, float('-inf'))
+        attn = F.softmax(attn, dim=-1)
+        attn = self.dropout(attn)
+        x = (attn @ v).transpose(1, 2).contiguous().reshape(B, N, C)
+        return self.out(x)
+
+class GQABlock(nn.Module):
+    def __init__(self, d_model, n_heads):
+        super().__init__()
+        self.ln1 = nn.LayerNorm(d_model)
+        self.attn = GQA(d_model, n_heads, n_kv_heads=2)
+        self.ln2 = nn.LayerNorm(d_model)
+        self.ffn = nn.Sequential(nn.Linear(d_model, d_model * 4), nn.GELU(), nn.Linear(d_model * 4, d_model), nn.Dropout(0.1))
+    def forward(self, x):
+        x = x + self.attn(self.ln1(x))
+        x = x + self.ffn(self.ln2(x))
+        return x
+
+class Transformer_DeepGQA32(nn.Module):
+    """DeepGQA32: 32-layer pure GQA for deep scaling comparison."""
+    def __init__(self, d_model=256, vocab_size=8000, n_layers=4, n_heads=8):
+        super().__init__()
+        self.embed = nn.Embedding(vocab_size, d_model)
+        self.pos = nn.Embedding(5000, d_model)
+        self.blocks = nn.ModuleList([GQABlock(d_model, n_heads) for _ in range(32)])
+        self.ln_f = nn.LayerNorm(d_model)
+        self.head = nn.Linear(d_model, vocab_size)
+    def forward(self, x):
+        B, T = x.shape
+        x = self.embed(x) + self.pos(torch.arange(T, device=x.device))
+        for block in self.blocks: x = block(x)
+        return self.head(self.ln_f(x))
+''',
+
+    "Transformer_MHA40": '''
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class MHA(nn.Module):
+    def __init__(self, d_model, n_heads, dropout=0.1):
+        super().__init__()
+        self.n_heads = n_heads
+        self.head_dim = d_model // n_heads
+        self.scale = self.head_dim ** -0.5
+        self.qkv = nn.Linear(d_model, 3 * d_model)
+        self.out = nn.Linear(d_model, d_model)
+        self.dropout = nn.Dropout(dropout)
+    def forward(self, x):
+        B, N, C = x.shape
+        qkv = self.qkv(x).reshape(B, N, 3, self.n_heads, self.head_dim).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv[0], qkv[1], qkv[2]
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+        mask = torch.triu(torch.ones(N, N, device=x.device), diagonal=1).bool()
+        attn = attn.masked_fill(mask, float('-inf'))
+        attn = F.softmax(attn, dim=-1)
+        attn = self.dropout(attn)
+        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
+        return self.out(x)
+
+class MHABlock(nn.Module):
+    def __init__(self, d_model, n_heads):
+        super().__init__()
+        self.ln1 = nn.LayerNorm(d_model)
+        self.attn = MHA(d_model, n_heads)
+        self.ln2 = nn.LayerNorm(d_model)
+        self.ffn = nn.Sequential(nn.Linear(d_model, d_model * 4), nn.GELU(), nn.Linear(d_model * 4, d_model), nn.Dropout(0.1))
+    def forward(self, x):
+        x = x + self.attn(self.ln1(x))
+        x = x + self.ffn(self.ln2(x))
+        return x
+
+class Transformer_MHA40(nn.Module):
+    """MHA40: 40-layer pure MHA for deep scaling comparison."""
+    def __init__(self, d_model=256, vocab_size=8000, n_layers=4, n_heads=8):
+        super().__init__()
+        self.embed = nn.Embedding(vocab_size, d_model)
+        self.pos = nn.Embedding(5000, d_model)
+        self.blocks = nn.ModuleList([MHABlock(d_model, n_heads) for _ in range(40)])
+        self.ln_f = nn.LayerNorm(d_model)
+        self.head = nn.Linear(d_model, vocab_size)
+    def forward(self, x):
+        B, T = x.shape
+        x = self.embed(x) + self.pos(torch.arange(T, device=x.device))
+        for block in self.blocks: x = block(x)
+        return self.head(self.ln_f(x))
+''',
+
+    "Transformer_DeepGQA40": '''
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class GQA(nn.Module):
+    def __init__(self, d_model, n_heads, n_kv_heads=2, dropout=0.1):
+        super().__init__()
+        self.n_heads = n_heads
+        self.n_kv_heads = n_kv_heads
+        self.head_dim = d_model // n_heads
+        self.scale = self.head_dim ** -0.5
+        self.q_proj = nn.Linear(d_model, d_model)
+        self.k_proj = nn.Linear(d_model, n_kv_heads * self.head_dim)
+        self.v_proj = nn.Linear(d_model, n_kv_heads * self.head_dim)
+        self.out = nn.Linear(d_model, d_model)
+        self.dropout = nn.Dropout(dropout)
+    def forward(self, x):
+        B, N, C = x.shape
+        q = self.q_proj(x).reshape(B, N, self.n_heads, self.head_dim).transpose(1, 2).contiguous()
+        k = self.k_proj(x).reshape(B, N, self.n_kv_heads, self.head_dim).transpose(1, 2).contiguous()
+        v = self.v_proj(x).reshape(B, N, self.n_kv_heads, self.head_dim).transpose(1, 2).contiguous()
+        n_rep = self.n_heads // self.n_kv_heads
+        k = k.repeat_interleave(n_rep, dim=1).contiguous()
+        v = v.repeat_interleave(n_rep, dim=1).contiguous()
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+        mask = torch.triu(torch.ones(N, N, device=x.device), diagonal=1).bool()
+        attn = attn.masked_fill(mask, float('-inf'))
+        attn = F.softmax(attn, dim=-1)
+        attn = self.dropout(attn)
+        x = (attn @ v).transpose(1, 2).contiguous().reshape(B, N, C)
+        return self.out(x)
+
+class GQABlock(nn.Module):
+    def __init__(self, d_model, n_heads):
+        super().__init__()
+        self.ln1 = nn.LayerNorm(d_model)
+        self.attn = GQA(d_model, n_heads, n_kv_heads=2)
+        self.ln2 = nn.LayerNorm(d_model)
+        self.ffn = nn.Sequential(nn.Linear(d_model, d_model * 4), nn.GELU(), nn.Linear(d_model * 4, d_model), nn.Dropout(0.1))
+    def forward(self, x):
+        x = x + self.attn(self.ln1(x))
+        x = x + self.ffn(self.ln2(x))
+        return x
+
+class Transformer_DeepGQA40(nn.Module):
+    """DeepGQA40: 40-layer pure GQA for deep scaling comparison."""
+    def __init__(self, d_model=256, vocab_size=8000, n_layers=4, n_heads=8):
+        super().__init__()
+        self.embed = nn.Embedding(vocab_size, d_model)
+        self.pos = nn.Embedding(5000, d_model)
+        self.blocks = nn.ModuleList([GQABlock(d_model, n_heads) for _ in range(40)])
+        self.ln_f = nn.LayerNorm(d_model)
+        self.head = nn.Linear(d_model, vocab_size)
+    def forward(self, x):
+        B, T = x.shape
+        x = self.embed(x) + self.pos(torch.arange(T, device=x.device))
+        for block in self.blocks: x = block(x)
+        return self.head(self.ln_f(x))
+''',
+
+    "Transformer_MHA48": '''
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class MHA(nn.Module):
+    def __init__(self, d_model, n_heads, dropout=0.1):
+        super().__init__()
+        self.n_heads = n_heads
+        self.head_dim = d_model // n_heads
+        self.scale = self.head_dim ** -0.5
+        self.qkv = nn.Linear(d_model, 3 * d_model)
+        self.out = nn.Linear(d_model, d_model)
+        self.dropout = nn.Dropout(dropout)
+    def forward(self, x):
+        B, N, C = x.shape
+        qkv = self.qkv(x).reshape(B, N, 3, self.n_heads, self.head_dim).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv[0], qkv[1], qkv[2]
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+        mask = torch.triu(torch.ones(N, N, device=x.device), diagonal=1).bool()
+        attn = attn.masked_fill(mask, float('-inf'))
+        attn = F.softmax(attn, dim=-1)
+        attn = self.dropout(attn)
+        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
+        return self.out(x)
+
+class MHABlock(nn.Module):
+    def __init__(self, d_model, n_heads):
+        super().__init__()
+        self.ln1 = nn.LayerNorm(d_model)
+        self.attn = MHA(d_model, n_heads)
+        self.ln2 = nn.LayerNorm(d_model)
+        self.ffn = nn.Sequential(nn.Linear(d_model, d_model * 4), nn.GELU(), nn.Linear(d_model * 4, d_model), nn.Dropout(0.1))
+    def forward(self, x):
+        x = x + self.attn(self.ln1(x))
+        x = x + self.ffn(self.ln2(x))
+        return x
+
+class Transformer_MHA48(nn.Module):
+    """MHA48: 48-layer pure MHA for deep scaling comparison."""
+    def __init__(self, d_model=256, vocab_size=8000, n_layers=4, n_heads=8):
+        super().__init__()
+        self.embed = nn.Embedding(vocab_size, d_model)
+        self.pos = nn.Embedding(5000, d_model)
+        self.blocks = nn.ModuleList([MHABlock(d_model, n_heads) for _ in range(48)])
+        self.ln_f = nn.LayerNorm(d_model)
+        self.head = nn.Linear(d_model, vocab_size)
+    def forward(self, x):
+        B, T = x.shape
+        x = self.embed(x) + self.pos(torch.arange(T, device=x.device))
+        for block in self.blocks: x = block(x)
+        return self.head(self.ln_f(x))
+''',
+
+    "Transformer_DeepGQA48": '''
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class GQA(nn.Module):
+    def __init__(self, d_model, n_heads, n_kv_heads=2, dropout=0.1):
+        super().__init__()
+        self.n_heads = n_heads
+        self.n_kv_heads = n_kv_heads
+        self.head_dim = d_model // n_heads
+        self.scale = self.head_dim ** -0.5
+        self.q_proj = nn.Linear(d_model, d_model)
+        self.k_proj = nn.Linear(d_model, n_kv_heads * self.head_dim)
+        self.v_proj = nn.Linear(d_model, n_kv_heads * self.head_dim)
+        self.out = nn.Linear(d_model, d_model)
+        self.dropout = nn.Dropout(dropout)
+    def forward(self, x):
+        B, N, C = x.shape
+        q = self.q_proj(x).reshape(B, N, self.n_heads, self.head_dim).transpose(1, 2).contiguous()
+        k = self.k_proj(x).reshape(B, N, self.n_kv_heads, self.head_dim).transpose(1, 2).contiguous()
+        v = self.v_proj(x).reshape(B, N, self.n_kv_heads, self.head_dim).transpose(1, 2).contiguous()
+        n_rep = self.n_heads // self.n_kv_heads
+        k = k.repeat_interleave(n_rep, dim=1).contiguous()
+        v = v.repeat_interleave(n_rep, dim=1).contiguous()
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+        mask = torch.triu(torch.ones(N, N, device=x.device), diagonal=1).bool()
+        attn = attn.masked_fill(mask, float('-inf'))
+        attn = F.softmax(attn, dim=-1)
+        attn = self.dropout(attn)
+        x = (attn @ v).transpose(1, 2).contiguous().reshape(B, N, C)
+        return self.out(x)
+
+class GQABlock(nn.Module):
+    def __init__(self, d_model, n_heads):
+        super().__init__()
+        self.ln1 = nn.LayerNorm(d_model)
+        self.attn = GQA(d_model, n_heads, n_kv_heads=2)
+        self.ln2 = nn.LayerNorm(d_model)
+        self.ffn = nn.Sequential(nn.Linear(d_model, d_model * 4), nn.GELU(), nn.Linear(d_model * 4, d_model), nn.Dropout(0.1))
+    def forward(self, x):
+        x = x + self.attn(self.ln1(x))
+        x = x + self.ffn(self.ln2(x))
+        return x
+
+class Transformer_DeepGQA48(nn.Module):
+    """DeepGQA48: 48-layer pure GQA for deep scaling comparison."""
+    def __init__(self, d_model=256, vocab_size=8000, n_layers=4, n_heads=8):
+        super().__init__()
+        self.embed = nn.Embedding(vocab_size, d_model)
+        self.pos = nn.Embedding(5000, d_model)
+        self.blocks = nn.ModuleList([GQABlock(d_model, n_heads) for _ in range(48)])
+        self.ln_f = nn.LayerNorm(d_model)
+        self.head = nn.Linear(d_model, vocab_size)
+    def forward(self, x):
+        B, T = x.shape
+        x = self.embed(x) + self.pos(torch.arange(T, device=x.device))
+        for block in self.blocks: x = block(x)
+        return self.head(self.ln_f(x))
+''',
 }
 
 
