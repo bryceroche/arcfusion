@@ -309,17 +309,25 @@ def retrain_if_needed(db: ArcFusionDB, model_path: str, min_new_samples: int = 3
     model.fit(X, y_ppl, y_time)
     model.save(model_path)
 
-    # Quick evaluation
+    # Quick evaluation on training data
     ppl_pred = model.predict_ppl(X)
     mae = np.mean(np.abs(ppl_pred - y_ppl))
     corr = np.corrcoef(ppl_pred, y_ppl)[0, 1]
 
     # Update predictions for untrained dream candidates
     n_updated = update_untrained_candidate_predictions(db, model)
-    if n_updated > 0:
-        return True, f"Retrained on {current_samples} samples (+{new_samples}). MAE={mae:.1f}, corr={corr:.3f}. Updated {n_updated} candidate predictions."
 
-    return True, f"Retrained on {current_samples} samples (+{new_samples}). MAE={mae:.1f}, corr={corr:.3f}"
+    # Check prediction accuracy on dream candidates (predicted vs actual)
+    accuracy = db.get_surrogate_accuracy_stats()
+    accuracy_msg = ""
+    if accuracy.get('n_samples', 0) >= 2 and not accuracy.get('insufficient_data'):
+        accuracy_msg = f" Prediction accuracy: MAPE={accuracy['ppl_mape']:.1f}%"
+
+    base_msg = f"Retrained on {current_samples} samples (+{new_samples}). MAE={mae:.1f}, corr={corr:.3f}"
+    if n_updated > 0:
+        return True, f"{base_msg}. Updated {n_updated} candidate predictions.{accuracy_msg}"
+
+    return True, f"{base_msg}{accuracy_msg}"
 
 
 def update_untrained_candidate_predictions(db: ArcFusionDB, model: SurrogateModel) -> int:

@@ -418,3 +418,69 @@ def test_update_dream_candidate_training(db):
     assert candidates[0].actual_ppl == 245.0
     assert candidates[0].actual_time == 135.0
     assert candidates[0].training_run_id == "run-12345"
+
+
+def test_get_surrogate_accuracy_stats_insufficient_data(db):
+    """Test accuracy stats with insufficient data."""
+    # No candidates - should return insufficient_data
+    stats = db.get_surrogate_accuracy_stats()
+    assert stats['n_samples'] == 0
+    assert stats['insufficient_data'] is True
+
+    # Add one trained candidate - still insufficient
+    candidate = DreamCandidate(
+        strategy="greedy",
+        temperature=0.2,
+        components_json='["Attention"]',
+        n_layers=10,
+        n_kv_heads=8,
+        has_mamba=False,
+        has_linear_attn=False,
+        is_hybrid=False,
+        arch_type="mha",
+        predicted_ppl=300.0,
+        predicted_time=150.0,
+        was_trained=True,
+        actual_ppl=280.0,
+        actual_time=140.0,
+    )
+    db.add_dream_candidate(candidate)
+
+    stats = db.get_surrogate_accuracy_stats()
+    assert stats['n_samples'] == 1
+    assert stats['insufficient_data'] is True
+
+
+def test_get_surrogate_accuracy_stats_with_data(db):
+    """Test accuracy stats with sufficient data."""
+    # Add two trained candidates with predictions and actuals
+    for i, (pred_ppl, actual_ppl, pred_time, actual_time) in enumerate([
+        (300.0, 280.0, 150.0, 140.0),  # 7% PPL error, 7% time error
+        (250.0, 240.0, 100.0, 110.0),  # 4% PPL error, 9% time error
+    ]):
+        candidate = DreamCandidate(
+            strategy="greedy",
+            temperature=0.1 * i,
+            components_json=f'["Component{i}"]',
+            n_layers=10,
+            n_kv_heads=8,
+            has_mamba=False,
+            has_linear_attn=False,
+            is_hybrid=False,
+            arch_type="mha",
+            predicted_ppl=pred_ppl,
+            predicted_time=pred_time,
+            was_trained=True,
+            actual_ppl=actual_ppl,
+            actual_time=actual_time,
+        )
+        db.add_dream_candidate(candidate)
+
+    stats = db.get_surrogate_accuracy_stats()
+    assert stats['n_samples'] == 2
+    assert stats['insufficient_data'] is False
+    assert stats['ppl_mae'] > 0  # Should have some error
+    assert stats['ppl_mape'] > 0  # Should have some percentage error
+    assert 'ppl_correlation' in stats
+    assert stats['time_mae'] is not None
+    assert stats['time_mape'] is not None

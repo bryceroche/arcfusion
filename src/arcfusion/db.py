@@ -2543,6 +2543,80 @@ class ArcFusionDB:
             'dream_candidates_trained': self.conn.execute("SELECT COUNT(*) FROM dream_candidates WHERE was_trained = 1").fetchone()[0],
         }
 
+    def get_surrogate_accuracy_stats(self) -> dict:
+        """Get accuracy statistics for surrogate model predictions.
+
+        Compares predicted_ppl/predicted_time vs actual_ppl/actual_time
+        for trained dream candidates.
+
+        Returns:
+            Dict with accuracy metrics, or empty dict if insufficient data.
+        """
+        rows = self.conn.execute("""
+            SELECT predicted_ppl, actual_ppl, predicted_time, actual_time
+            FROM dream_candidates
+            WHERE was_trained = 1
+              AND actual_ppl IS NOT NULL
+              AND predicted_ppl IS NOT NULL
+              AND predicted_ppl > 0
+        """).fetchall()
+
+        if len(rows) < 2:
+            return {
+                'n_samples': len(rows),
+                'insufficient_data': True,
+            }
+
+        # Calculate metrics
+        ppl_errors = []
+        ppl_pct_errors = []
+        time_errors = []
+        time_pct_errors = []
+
+        for pred_ppl, actual_ppl, pred_time, actual_time in rows:
+            # PPL metrics
+            ppl_errors.append(abs(pred_ppl - actual_ppl))
+            ppl_pct_errors.append(abs(pred_ppl - actual_ppl) / actual_ppl * 100)
+
+            # Time metrics (if available)
+            if pred_time and actual_time and actual_time > 0:
+                time_errors.append(abs(pred_time - actual_time))
+                time_pct_errors.append(abs(pred_time - actual_time) / actual_time * 100)
+
+        # Compute summary stats
+        def mean(lst):
+            return sum(lst) / len(lst) if lst else 0
+
+        def correlation(pred, actual):
+            """Pearson correlation coefficient."""
+            if len(pred) < 2:
+                return 0.0
+            n = len(pred)
+            mean_p = sum(pred) / n
+            mean_a = sum(actual) / n
+            num = sum((p - mean_p) * (a - mean_a) for p, a in zip(pred, actual))
+            den_p = sum((p - mean_p) ** 2 for p in pred) ** 0.5
+            den_a = sum((a - mean_a) ** 2 for a in actual) ** 0.5
+            if den_p * den_a == 0:
+                return 0.0
+            return num / (den_p * den_a)
+
+        pred_ppls = [r[0] for r in rows]
+        actual_ppls = [r[1] for r in rows]
+        pred_times = [r[2] for r in rows if r[2] and r[3]]
+        actual_times = [r[3] for r in rows if r[2] and r[3]]
+
+        return {
+            'n_samples': len(rows),
+            'insufficient_data': False,
+            'ppl_mae': mean(ppl_errors),
+            'ppl_mape': mean(ppl_pct_errors),  # Mean Absolute Percentage Error
+            'ppl_correlation': correlation(pred_ppls, actual_ppls),
+            'time_mae': mean(time_errors) if time_errors else None,
+            'time_mape': mean(time_pct_errors) if time_pct_errors else None,
+            'time_correlation': correlation(pred_times, actual_times) if len(pred_times) >= 2 else None,
+        }
+
     def close(self):
         self.conn.close()
 

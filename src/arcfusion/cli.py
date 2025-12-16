@@ -101,6 +101,25 @@ def cmd_stats(args: argparse.Namespace) -> None:
         for k, v in stats.items():
             print(f"  {k}: {v}")
 
+        # Show surrogate model accuracy if available
+        accuracy = db.get_surrogate_accuracy_stats()
+        if accuracy.get('n_samples', 0) > 0:
+            print()
+            print("Surrogate Model Accuracy:")
+            print("-" * 40)
+            if accuracy.get('insufficient_data'):
+                print(f"  samples: {accuracy['n_samples']} (need 2+ for metrics)")
+            else:
+                print(f"  samples: {accuracy['n_samples']}")
+                print(f"  PPL MAE: {accuracy['ppl_mae']:.1f}")
+                print(f"  PPL MAPE: {accuracy['ppl_mape']:.1f}%")
+                print(f"  PPL correlation: {accuracy['ppl_correlation']:.3f}")
+                if accuracy.get('time_mae') is not None:
+                    print(f"  Time MAE: {accuracy['time_mae']:.1f}s")
+                    print(f"  Time MAPE: {accuracy['time_mape']:.1f}%")
+                if accuracy.get('time_correlation') is not None:
+                    print(f"  Time correlation: {accuracy['time_correlation']:.3f}")
+
 
 def cmd_list(args: argparse.Namespace) -> None:
     """List components or engines."""
