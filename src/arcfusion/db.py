@@ -401,9 +401,9 @@ class Summary:
 class ArcFusionDB:
     """SQLite database for ML architecture components and engines"""
 
-    def __init__(self, db_path: str = "arcfusion.db"):
+    def __init__(self, db_path: str = "arcfusion.db", check_same_thread: bool = True):
         self.db_path = Path(db_path)
-        self.conn = sqlite3.connect(str(self.db_path))
+        self.conn = sqlite3.connect(str(self.db_path), check_same_thread=check_same_thread)
         self.conn.row_factory = sqlite3.Row
         self._migrate()  # Run migrations BEFORE schema init (to add columns needed for new indexes)
         self._init_schema()

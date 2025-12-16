@@ -25,7 +25,7 @@ st.set_page_config(
 @st.cache_resource
 def get_db():
     db_path = Path(__file__).parent.parent / "arcfusion.db"
-    return ArcFusionDB(str(db_path))
+    return ArcFusionDB(str(db_path), check_same_thread=False)
 
 db = get_db()
 
