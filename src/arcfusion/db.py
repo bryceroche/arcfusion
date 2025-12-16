@@ -13,7 +13,9 @@ Tables:
 import sqlite3
 import json
 import hashlib
+import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Optional
 from pathlib import Path
 
@@ -326,6 +328,38 @@ class TrainingInsight:
             self.insight_id = hashlib.sha256(content.encode()).hexdigest()[:12]
 
 
+@dataclass
+class Summary:
+    """
+    Compressed knowledge storage for context preservation and retrieval.
+
+    Types:
+    - 'session': Work session summary (what was accomplished)
+    - 'recipe': Architecture recipe card (what makes it tick)
+    - 'experiment': Experiment findings summary
+    - 'knowledge': General compressed knowledge
+
+    Use cases:
+    - Restore context after compaction
+    - Feed compressed knowledge to dream engine
+    - Query past findings efficiently
+    """
+    summary_type: str  # session, recipe, experiment, knowledge
+    title: str  # Short descriptive title
+    content: str  # The compressed summary text
+    context_json: str = ""  # Optional structured data (run_ids, metrics, etc.)
+    tags: str = ""  # Comma-separated for querying
+    source_ref: str = ""  # What was summarized (run_id, model_name, etc.)
+    summary_id: str = ""
+    created_at: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.summary_id:
+            import time
+            content = f"{self.summary_type}{self.title}{time.time()}"
+            self.summary_id = hashlib.sha256(content.encode()).hexdigest()[:12]
+
+
 class ArcFusionDB:
     """SQLite database for ML architecture components and engines"""
 
@@ -570,6 +604,18 @@ class ArcFusionDB:
                 FOREIGN KEY (source_run_id) REFERENCES training_runs(run_id)
             );
 
+            -- Summaries: compressed knowledge storage
+            CREATE TABLE IF NOT EXISTS summaries (
+                summary_id TEXT PRIMARY KEY,
+                summary_type TEXT NOT NULL,  -- session, recipe, experiment, knowledge
+                title TEXT NOT NULL,
+                content TEXT NOT NULL,
+                context_json TEXT,  -- Optional structured data
+                tags TEXT,
+                source_ref TEXT,  -- What was summarized
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+
             -- Indexes
             CREATE INDEX IF NOT EXISTS idx_comp_usefulness ON components(usefulness_score DESC);
             CREATE INDEX IF NOT EXISTS idx_comp_complexity ON components(time_complexity);
@@ -609,6 +655,10 @@ class ArcFusionDB:
             CREATE INDEX IF NOT EXISTS idx_insight_run ON training_insights(source_run_id);
             CREATE INDEX IF NOT EXISTS idx_insight_confidence ON training_insights(confidence DESC);
             CREATE INDEX IF NOT EXISTS idx_insight_created ON training_insights(created_at DESC);
+            -- Summary indexes
+            CREATE INDEX IF NOT EXISTS idx_summary_type ON summaries(summary_type);
+            CREATE INDEX IF NOT EXISTS idx_summary_source ON summaries(source_ref);
+            CREATE INDEX IF NOT EXISTS idx_summary_created ON summaries(created_at DESC);
         """)
         self.conn.commit()
 
@@ -2100,6 +2150,101 @@ class ArcFusionDB:
         cursor = self.conn.execute(
             "DELETE FROM training_insights WHERE insight_id = ?",
             (insight_id,)
+        )
+        self.conn.commit()
+        return cursor.rowcount > 0
+
+    # -------------------------------------------------------------------------
+    # Summary operations (compressed knowledge storage)
+    # -------------------------------------------------------------------------
+    def add_summary(self, summary: Summary) -> str:
+        """Add a summary for compressed knowledge storage."""
+        summary_id = summary.summary_id or f"sum-{uuid.uuid4().hex[:8]}"
+        created_at = summary.created_at or datetime.now(timezone.utc).isoformat()
+
+        self.conn.execute("""
+            INSERT INTO summaries (
+                summary_id, summary_type, title, content,
+                context_json, tags, source_ref, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            summary_id, summary.summary_type, summary.title, summary.content,
+            summary.context_json, summary.tags, summary.source_ref, created_at
+        ))
+        self.conn.commit()
+        return summary_id
+
+    def get_summary(self, summary_id: str) -> Summary | None:
+        """Get a summary by ID."""
+        row = self.conn.execute(
+            "SELECT * FROM summaries WHERE summary_id = ?",
+            (summary_id,)
+        ).fetchone()
+        if not row:
+            return None
+        return Summary(
+            summary_id=row['summary_id'],
+            summary_type=row['summary_type'],
+            title=row['title'],
+            content=row['content'],
+            context_json=row['context_json'],
+            tags=row['tags'],
+            source_ref=row['source_ref'],
+            created_at=row['created_at']
+        )
+
+    def list_summaries(
+        self,
+        summary_type: str | None = None,
+        tags: str | None = None,
+        search: str | None = None,
+        limit: int = 50
+    ) -> list[Summary]:
+        """List summaries with optional filtering."""
+        query = "SELECT * FROM summaries WHERE 1=1"
+        params: list = []
+
+        if summary_type:
+            query += " AND summary_type = ?"
+            params.append(summary_type)
+
+        if tags:
+            # Search for any of the comma-separated tags
+            tag_conditions = []
+            for tag in tags.split(','):
+                tag = tag.strip()
+                tag_conditions.append("tags LIKE ?")
+                params.append(f"%{tag}%")
+            if tag_conditions:
+                query += f" AND ({' OR '.join(tag_conditions)})"
+
+        if search:
+            query += " AND (title LIKE ? OR content LIKE ?)"
+            params.extend([f"%{search}%", f"%{search}%"])
+
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+
+        rows = self.conn.execute(query, params).fetchall()
+        return [
+            Summary(
+                summary_id=row['summary_id'],
+                summary_type=row['summary_type'],
+                title=row['title'],
+                content=row['content'],
+                context_json=row['context_json'],
+                tags=row['tags'],
+                source_ref=row['source_ref'],
+                created_at=row['created_at']
+            )
+            for row in rows
+        ]
+
+    def delete_summary(self, summary_id: str) -> bool:
+        """Delete a summary."""
+        cursor = self.conn.execute(
+            "DELETE FROM summaries WHERE summary_id = ?",
+            (summary_id,)
         )
         self.conn.commit()
         return cursor.rowcount > 0

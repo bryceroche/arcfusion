@@ -1050,6 +1050,144 @@ def cmd_leaderboard(args: argparse.Namespace) -> None:
         print("  D: Worse quality and slower")
 
 
+def cmd_summary(args: argparse.Namespace) -> None:
+    """Manage summaries - compressed knowledge storage for context preservation."""
+    from .db import Summary
+
+    with ArcFusionDB(args.db) as db:
+        action = args.action
+
+        if action == "add":
+            # Add a new summary
+            if not args.title or not args.content:
+                print("ERROR: --title and --content are required for 'add' action")
+                return
+
+            summary = Summary(
+                summary_type=args.type or "knowledge",
+                title=args.title,
+                content=args.content,
+                context_json=args.context or "",
+                tags=args.tags or "",
+                source_ref=args.source or "",
+            )
+            summary_id = db.add_summary(summary)
+            print(f"Created summary: {summary_id}")
+            print(f"  Type: {summary.summary_type}")
+            print(f"  Title: {summary.title}")
+            if summary.tags:
+                print(f"  Tags: {summary.tags}")
+
+        elif action == "list":
+            # List summaries with optional filters
+            summaries = db.list_summaries(
+                summary_type=args.type,
+                tags=args.tags,
+                search=args.search,
+                limit=args.limit
+            )
+            if not summaries:
+                print("No summaries found.")
+                return
+
+            print(f"{'ID':<14} {'Type':<12} {'Title':<40} {'Tags':<20}")
+            print("-" * 90)
+            for s in summaries:
+                title = s.title[:38] + ".." if len(s.title) > 40 else s.title
+                tags = s.tags[:18] + ".." if len(s.tags) > 20 else s.tags
+                print(f"{s.summary_id:<14} {s.summary_type:<12} {title:<40} {tags:<20}")
+            print(f"\nTotal: {len(summaries)} summaries")
+
+        elif action == "show":
+            # Show a specific summary
+            if not args.summary_id:
+                print("ERROR: --id is required for 'show' action")
+                return
+
+            summary = db.get_summary(args.summary_id)
+            if not summary:
+                print(f"Summary not found: {args.summary_id}")
+                return
+
+            print(f"Summary: {summary.summary_id}")
+            print(f"Type: {summary.summary_type}")
+            print(f"Title: {summary.title}")
+            print(f"Created: {summary.created_at}")
+            if summary.tags:
+                print(f"Tags: {summary.tags}")
+            if summary.source_ref:
+                print(f"Source: {summary.source_ref}")
+            print("\n--- Content ---")
+            print(summary.content)
+            if summary.context_json:
+                print("\n--- Context (JSON) ---")
+                print(summary.context_json)
+
+        elif action == "delete":
+            # Delete a summary
+            if not args.summary_id:
+                print("ERROR: --id is required for 'delete' action")
+                return
+
+            if db.delete_summary(args.summary_id):
+                print(f"Deleted summary: {args.summary_id}")
+            else:
+                print(f"Summary not found: {args.summary_id}")
+
+        elif action == "recipe-cards":
+            # Auto-generate recipe cards from top training runs
+            runs = db.list_training_runs(success_only=True, limit=args.limit or 10)
+
+            if not runs:
+                print("No training runs found to generate recipe cards.")
+                return
+
+            created = 0
+            for run in runs:
+                if not run.model_code:
+                    continue
+
+                # Check if summary already exists for this run
+                existing = db.list_summaries(
+                    summary_type="recipe",
+                    search=run.run_id,
+                    limit=1
+                )
+                if existing:
+                    continue
+
+                # Generate recipe card summary
+                ppl_str = f"{run.perplexity:.1f}" if run.perplexity else "N/A"
+                time_str = f"{run.time_seconds:.1f}s" if run.time_seconds else "N/A"
+
+                content = f"""## {run.model_name}
+
+**Performance**: {ppl_str} PPL @ {time_str}
+**Run ID**: {run.run_id}
+**Created**: {run.created_at}
+
+### Model Code
+```python
+{run.model_code}
+```
+
+### Notes
+{run.notes or 'No notes'}
+"""
+                summary = Summary(
+                    summary_type="recipe",
+                    title=f"Recipe: {run.model_name}",
+                    content=content,
+                    tags=f"model,{run.model_name}",
+                    source_ref=run.run_id,
+                )
+                db.add_summary(summary)
+                created += 1
+                print(f"Created recipe card: {run.model_name}")
+
+            print(f"\nGenerated {created} recipe cards from {len(runs)} training runs.")
+
+
 def main() -> None:
     """
     ArcFusion CLI entry point.
@@ -1276,6 +1414,29 @@ Examples:
                                     help="Baseline model for comparison (default: Transformer_MHA)")
     leaderboard_parser.add_argument("--limit", "-l", type=int, default=50, help="Max results (default: 50)")
 
+    # summary (compressed knowledge storage)
+    summary_parser = subparsers.add_parser(
+        "summary",
+        help="Manage summaries - compressed knowledge for context preservation",
+        description="Store and retrieve compressed knowledge summaries. "
+                    "Types: session (work summaries), recipe (model cards), experiment (results), knowledge (learnings)."
+    )
+    summary_parser.add_argument(
+        "action",
+        choices=["add", "list", "show", "delete", "recipe-cards"],
+        help="Action: add, list, show, delete, or recipe-cards (auto-generate from training runs)"
+    )
+    summary_parser.add_argument("--type", "-t", choices=["session", "recipe", "experiment", "knowledge"],
+                                help="Summary type filter or type for new summary")
+    summary_parser.add_argument("--title", help="Summary title (required for add)")
+    summary_parser.add_argument("--content", help="Summary content (required for add)")
+    summary_parser.add_argument("--tags", help="Comma-separated tags")
+    summary_parser.add_argument("--context", help="JSON context data")
+    summary_parser.add_argument("--source", help="Source reference (run_id, paper_id, etc.)")
+    summary_parser.add_argument("--search", "-s", help="Search in title/content")
+    summary_parser.add_argument("--id", dest="summary_id", help="Summary ID for show/delete")
+    summary_parser.add_argument("--limit", "-l", type=int, default=20, help="Max results (default: 20)")
+
     # web (web UI server)
     web_parser = subparsers.add_parser(
         "web",
@@ -1306,6 +1467,7 @@ Examples:
         "insights": cmd_insights,
         "recipe": cmd_recipe,
         "leaderboard": cmd_leaderboard,
+        "summary": cmd_summary,
         "web": cmd_web,
     }
 
