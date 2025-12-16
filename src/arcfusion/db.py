@@ -2434,6 +2434,20 @@ class ArcFusionDB:
         """, (training_run_id, actual_ppl, actual_time, candidate_id))
         self.conn.commit()
 
+    def update_dream_candidate_predictions(
+        self,
+        candidate_id: str,
+        predicted_ppl: float,
+        predicted_time: float
+    ) -> None:
+        """Update a dream candidate's surrogate model predictions."""
+        self.conn.execute("""
+            UPDATE dream_candidates
+            SET predicted_ppl = ?, predicted_time = ?
+            WHERE candidate_id = ?
+        """, (predicted_ppl, predicted_time, candidate_id))
+        self.conn.commit()
+
     def list_dream_candidates(
         self,
         trained_only: bool = False,

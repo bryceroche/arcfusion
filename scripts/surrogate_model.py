@@ -311,7 +311,60 @@ def retrain_if_needed(db: ArcFusionDB, model_path: str, min_new_samples: int = 3
     mae = np.mean(np.abs(ppl_pred - y_ppl))
     corr = np.corrcoef(ppl_pred, y_ppl)[0, 1]
 
+    # Update predictions for untrained dream candidates
+    n_updated = update_untrained_candidate_predictions(db, model)
+    if n_updated > 0:
+        return True, f"Retrained on {current_samples} samples (+{new_samples}). MAE={mae:.1f}, corr={corr:.3f}. Updated {n_updated} candidate predictions."
+
     return True, f"Retrained on {current_samples} samples (+{new_samples}). MAE={mae:.1f}, corr={corr:.3f}"
+
+
+def update_untrained_candidate_predictions(db: ArcFusionDB, model: SurrogateModel) -> int:
+    """Update surrogate predictions for all untrained dream candidates.
+
+    After retraining the surrogate model on new data, this updates the
+    predicted_ppl and predicted_time for candidates that haven't been
+    trained yet, giving them more accurate estimates.
+
+    Returns: Number of candidates updated
+    """
+    # Get all untrained candidates
+    candidates = db.list_dream_candidates(untrained_only=True, limit=1000)
+    if not candidates:
+        return 0
+
+    updated = 0
+    for cand in candidates:
+        # Build feature vector from candidate attributes
+        features = ArchFeatures(
+            n_layers=cand.n_layers,
+            n_kv_heads=cand.n_kv_heads,
+            has_mamba=cand.has_mamba,
+            has_linear_attn=cand.has_linear_attn,
+            is_hybrid=cand.is_hybrid,
+            is_fast_mamba=cand.has_mamba,  # Assume parallel scan for Mamba
+            d_model=256,  # Default from training config
+            n_heads=8,
+        )
+
+        # Predict new PPL and time
+        X = features.to_vector().reshape(1, -1)
+        try:
+            pred_ppl = float(model.predict_ppl(X)[0])
+            pred_time = float(model.predict_time(X)[0]) if model.weights_time is not None else 0.0
+
+            # Update if predictions changed significantly (> 1% difference)
+            ppl_diff = abs(pred_ppl - cand.predicted_ppl) / max(cand.predicted_ppl, 1.0)
+            time_diff = abs(pred_time - cand.predicted_time) / max(cand.predicted_time, 1.0) if cand.predicted_time > 0 else 1.0
+
+            if ppl_diff > 0.01 or time_diff > 0.01:
+                db.update_dream_candidate_predictions(cand.candidate_id, pred_ppl, pred_time)
+                updated += 1
+        except Exception:
+            # Skip candidates that can't be predicted (shouldn't happen)
+            continue
+
+    return updated
 
 
 def evaluate_model(model: SurrogateModel, X: np.ndarray, y_ppl: np.ndarray,
