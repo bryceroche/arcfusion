@@ -2938,6 +2938,63 @@ class Transformer_DeepGQA18(nn.Module):
         for block in self.blocks: x = block(x)
         return self.head(self.ln_f(x))
 ''',
+
+    "Transformer_MHA18": '''
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class MHA(nn.Module):
+    """Standard Multi-Head Attention with causal masking"""
+    def __init__(self, d_model, n_heads, dropout=0.1):
+        super().__init__()
+        self.n_heads = n_heads
+        self.head_dim = d_model // n_heads
+        self.scale = self.head_dim ** -0.5
+        self.qkv = nn.Linear(d_model, 3 * d_model)
+        self.out = nn.Linear(d_model, d_model)
+        self.dropout = nn.Dropout(dropout)
+    def forward(self, x):
+        B, N, C = x.shape
+        qkv = self.qkv(x).reshape(B, N, 3, self.n_heads, self.head_dim).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv[0], qkv[1], qkv[2]
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+        mask = torch.triu(torch.ones(N, N, device=x.device), diagonal=1).bool()
+        attn = attn.masked_fill(mask, float('-inf'))
+        attn = F.softmax(attn, dim=-1)
+        attn = self.dropout(attn)
+        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
+        return self.out(x)
+
+class MHABlock(nn.Module):
+    def __init__(self, d_model, n_heads):
+        super().__init__()
+        self.ln1 = nn.LayerNorm(d_model)
+        self.attn = MHA(d_model, n_heads)
+        self.ln2 = nn.LayerNorm(d_model)
+        self.ffn = nn.Sequential(nn.Linear(d_model, d_model * 4), nn.GELU(), nn.Linear(d_model * 4, d_model), nn.Dropout(0.1))
+    def forward(self, x):
+        x = x + self.attn(self.ln1(x))
+        x = x + self.ffn(self.ln2(x))
+        return x
+
+class Transformer_MHA18(nn.Module):
+    """MHA18: 18-layer pure MHA for apples-to-apples comparison with DeepGQA18.
+    Architecture: [MHA x 18]
+    """
+    def __init__(self, d_model=256, vocab_size=8000, n_layers=4, n_heads=8):
+        super().__init__()
+        self.embed = nn.Embedding(vocab_size, d_model)
+        self.pos = nn.Embedding(5000, d_model)
+        self.blocks = nn.ModuleList([MHABlock(d_model, n_heads) for _ in range(18)])
+        self.ln_f = nn.LayerNorm(d_model)
+        self.head = nn.Linear(d_model, vocab_size)
+    def forward(self, x):
+        B, T = x.shape
+        x = self.embed(x) + self.pos(torch.arange(T, device=x.device))
+        for block in self.blocks: x = block(x)
+        return self.head(self.ln_f(x))
+''',
 }
 
 
