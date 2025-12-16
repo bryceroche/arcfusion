@@ -160,6 +160,8 @@ class SurrogateModel:
         # Shared feature normalization
         self.mean_x = None
         self.std_x = None
+        # Training metadata
+        self.n_training_samples = 0
         # Legacy compatibility
         self.weights = None
         self.bias = None
@@ -168,6 +170,9 @@ class SurrogateModel:
 
     def fit(self, X: np.ndarray, y_ppl: np.ndarray, y_time: np.ndarray = None):
         """Fit linear regression for PPL and optionally time."""
+        # Track training data size
+        self.n_training_samples = len(X)
+
         # Standardize features
         self.mean_x = X.mean(axis=0)
         self.std_x = X.std(axis=0) + 1e-8
@@ -236,6 +241,7 @@ class SurrogateModel:
                 'std_y_ppl': self.std_y_ppl,
                 'mean_y_time': self.mean_y_time,
                 'std_y_time': self.std_y_time,
+                'n_training_samples': self.n_training_samples,
                 # Legacy fields
                 'weights': self.weights_ppl,
                 'bias': None,
@@ -262,10 +268,50 @@ class SurrogateModel:
                 self.std_y_ppl = data['std_y']
             self.mean_x = data['mean_x']
             self.std_x = data['std_x']
+            self.n_training_samples = data.get('n_training_samples', 0)
             # Legacy compatibility
             self.weights = self.weights_ppl
             self.mean_y = self.mean_y_ppl
             self.std_y = self.std_y_ppl
+
+
+def retrain_if_needed(db: ArcFusionDB, model_path: str, min_new_samples: int = 3) -> tuple[bool, str]:
+    """Retrain surrogate model if enough new training data exists.
+
+    Args:
+        db: Database connection
+        model_path: Path to surrogate model file
+        min_new_samples: Minimum new samples required to trigger retrain
+
+    Returns:
+        (retrained, message) tuple
+    """
+    # Load current model to check training sample count
+    model = SurrogateModel()
+    if Path(model_path).exists():
+        model.load(model_path)
+        old_samples = model.n_training_samples
+    else:
+        old_samples = 0
+
+    # Check current data count
+    X, y_ppl, y_time, names = load_training_data(db)
+    current_samples = len(X)
+    new_samples = current_samples - old_samples
+
+    if new_samples < min_new_samples:
+        return False, f"Only {new_samples} new samples (need {min_new_samples})"
+
+    # Retrain on all data
+    model.fit(X, y_ppl, y_time)
+    model.save(model_path)
+
+    # Quick evaluation
+    ppl_pred = model.predict_ppl(X)
+    mae = np.mean(np.abs(ppl_pred - y_ppl))
+    corr = np.corrcoef(ppl_pred, y_ppl)[0, 1]
+
+    return True, f"Retrained on {current_samples} samples (+{new_samples}). MAE={mae:.1f}, corr={corr:.3f}"
 
 
 def evaluate_model(model: SurrogateModel, X: np.ndarray, y_ppl: np.ndarray,

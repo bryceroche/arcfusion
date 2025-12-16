@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from cloud_train_fair import CONFIG, app, train_model, save_result_to_db, generate_auto_insight
 from db import ArcFusionDB, DreamCandidate
-from surrogate_model import SurrogateModel, ArchFeatures, extract_features
+from surrogate_model import SurrogateModel, ArchFeatures, extract_features, retrain_if_needed
 
 # Import composer components we need (avoiding full package import)
 # We'll use a simplified dreamer that queries the DB directly
@@ -853,6 +853,17 @@ def main():
         print(f"\nBest: {best['model_name']} ({best['ppl']:.1f} PPL)")
     else:
         print("No architectures trained successfully")
+
+    # Auto-update surrogate model if enough new data
+    if results:
+        print(f"\n{'=' * 70}")
+        print("PHASE 4: Updating surrogate model")
+        print("=" * 70)
+        retrained, msg = retrain_if_needed(db, str(surrogate_path), min_new_samples=2)
+        if retrained:
+            print(f"  ✓ {msg}")
+        else:
+            print(f"  Skipped: {msg}")
 
     print()
 
