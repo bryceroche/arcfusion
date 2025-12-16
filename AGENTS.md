@@ -195,6 +195,139 @@ Available in `scripts/`:
 
 ---
 
+## Empirical Architecture Search
+
+The `dream_and_train.py` pipeline enables automated architecture exploration by:
+1. Dreaming component combinations from the 60+ components in the DB
+2. Converting them to trainable PyTorch code
+3. Training on Modal A100 GPU
+4. Logging results + auto-generating insights
+
+### Running the Pipeline
+
+```bash
+# Run dream & train pipeline
+PYTHONUNBUFFERED=1 .venv-modal/bin/python scripts/dream_and_train.py
+```
+
+### Pipeline Flow
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│  1. DREAM: Query components from DB, select via strategy        │
+│     - greedy: Pick best from each category                       │
+│     - random: Temperature-controlled exploration                 │
+└────────────────────────┬─────────────────────────────────────────┘
+                         │
+                         ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  2. CATEGORIZE: Map components to architecture type              │
+│     attention → GQA/MQA/MHA | ssm → Mamba | linear → LinearAttn │
+└────────────────────────┬─────────────────────────────────────────┘
+                         │
+                         ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  3. GENERATE: Create trainable PyTorch code                      │
+│     Uses model_templates.py patterns                             │
+└────────────────────────┬─────────────────────────────────────────┘
+                         │
+                         ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  4. TRAIN: Execute on Modal A100 GPU (2-20 min per model)        │
+│     2000 steps, d_model=256, batch=64                            │
+└────────────────────────┬─────────────────────────────────────────┘
+                         │
+                         ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  5. LOG: Save to training_runs + training_insights tables        │
+│     Includes: PPL, time, components, strategy, vs_baseline       │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### Model Templates
+
+The `src/arcfusion/model_templates.py` module provides reusable code generation:
+
+```python
+from arcfusion.model_templates import generate_gqa_model, generate_mamba_model
+
+# GQA with 14 layers and 2 KV heads
+code, name = generate_gqa_model(n_layers=14, n_kv_heads=2)
+# Returns: (model_code_string, "Transformer_GQA14")
+
+# Mamba with parallel scan (4.64x faster)
+code, name = generate_mamba_model(n_layers=10, use_parallel_scan=True)
+# Returns: (model_code_string, "Transformer_MambaFast10")
+
+# Convenience functions
+code, name = mqa(12)  # Multi-Query Attention, 12 layers
+code, name = gqa(14)  # Grouped Query Attention, 14 layers
+code, name = mha(10)  # Multi-Head Attention, 10 layers
+code, name = mamba(8) # Mamba with parallel scan, 8 layers
+```
+
+### Extending with New Patterns
+
+Add new component-to-code mappings in `dream_and_train.py`:
+
+```python
+# In COMPONENT_PATTERNS dict:
+COMPONENT_PATTERNS = {
+    'your_new_mechanism': ('template_name', {'param': value}),
+    ...
+}
+
+# Add categorization in get_component_category():
+def get_component_category(name: str) -> str:
+    if 'your_keyword' in name_lower:
+        return 'your_category'
+    ...
+```
+
+### Querying Results
+
+```python
+from arcfusion.db import ArcFusionDB
+
+db = ArcFusionDB('arcfusion.db')
+
+# List all dreamed architectures
+dreamed = db.conn.execute("""
+    SELECT model_name, perplexity, time_seconds
+    FROM training_runs
+    WHERE model_name LIKE 'Dreamed_%'
+    ORDER BY perplexity
+""").fetchall()
+
+# Get insights from dreamed experiments
+insights = db.conn.execute("""
+    SELECT title, description, evidence_json
+    FROM training_insights
+    WHERE category = 'dreamed_architecture'
+""").fetchall()
+
+# Find best by efficiency (quality per second)
+efficient = db.conn.execute("""
+    SELECT model_name, perplexity, time_seconds,
+           time_seconds / (300.0 - perplexity) as efficiency
+    FROM training_runs
+    WHERE success = 1
+    ORDER BY efficiency
+    LIMIT 10
+""").fetchall()
+```
+
+### Current Results (48 training runs)
+
+| Category | Best Model | PPL | Time |
+|----------|-----------|-----|------|
+| **Quality** | MHA32 | 217.1 | 179s |
+| **Efficiency** | MHA10 | 247.6 | 72s |
+| **Speedup** | MambaFast | 227.9 | 152s (4.64x faster) |
+| **Sweet Spot** | GQA14 | 235.4 | 108s |
+
+---
+
 ## Project-Specific Guidelines
 
 ### Adding New Components
