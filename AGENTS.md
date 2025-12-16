@@ -153,6 +153,48 @@ See full details: [beads AGENT_INSTRUCTIONS.md](https://github.com/steveyegge/be
 
 ---
 
+## Cloud Training (Modal GPU)
+
+Training scripts run on Modal cloud GPUs (A100). Follow these practices to avoid issues.
+
+### Always Run in Background
+
+**CRITICAL**: Training runs can take 2-20 minutes. Always use background execution when invoking training scripts to prevent Claude Code context compaction from interrupting Modal connections.
+
+```bash
+# CORRECT: Background execution with run_in_background=True
+PYTHONUNBUFFERED=1 .venv-modal/bin/python scripts/run_example.py
+
+# Use PYTHONUNBUFFERED=1 for real-time output streaming
+```
+
+### Pre-Training Checklist
+
+Before starting long training runs:
+
+1. **Consider compaction**: If context is getting long, run `/compact` first
+2. **Use background execution**: Set `run_in_background=True` in Bash tool calls
+3. **Enable unbuffered output**: Prefix with `PYTHONUNBUFFERED=1`
+4. **Monitor with BashOutput**: Check progress without interrupting
+
+### Why This Matters
+
+Claude Code compaction (context summarization) can occur during long sessions. If training runs in the foreground when compaction triggers:
+- Modal connection may timeout waiting for response
+- Partial results may be lost
+- Container may get killed
+
+Background execution isolates training from compaction entirely.
+
+### Training Scripts
+
+Available in `scripts/`:
+- `run_*.py` - Various model training experiments
+- All use `cloud_train_fair.py` for Modal GPU orchestration
+- Results auto-save to `arcfusion.db` training_runs table
+
+---
+
 ## Project-Specific Guidelines
 
 ### Adding New Components
