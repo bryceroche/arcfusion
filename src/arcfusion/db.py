@@ -13,7 +13,6 @@ Tables:
 import sqlite3
 import json
 import hashlib
-import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -355,8 +354,8 @@ class Summary:
 
     def __post_init__(self) -> None:
         if not self.summary_id:
-            import time
-            content = f"{self.summary_type}{self.title}{time.time()}"
+            ts = datetime.now(timezone.utc).timestamp()
+            content = f"{self.summary_type}{self.title}{ts}"
             self.summary_id = hashlib.sha256(content.encode()).hexdigest()[:12]
 
 
@@ -2159,7 +2158,6 @@ class ArcFusionDB:
     # -------------------------------------------------------------------------
     def add_summary(self, summary: Summary) -> str:
         """Add a summary for compressed knowledge storage."""
-        summary_id = summary.summary_id or f"sum-{uuid.uuid4().hex[:8]}"
         created_at = summary.created_at or datetime.now(timezone.utc).isoformat()
 
         self.conn.execute("""
@@ -2168,11 +2166,11 @@ class ArcFusionDB:
                 context_json, tags, source_ref, created_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """, (
-            summary_id, summary.summary_type, summary.title, summary.content,
+            summary.summary_id, summary.summary_type, summary.title, summary.content,
             summary.context_json, summary.tags, summary.source_ref, created_at
         ))
         self.conn.commit()
-        return summary_id
+        return summary.summary_id
 
     def get_summary(self, summary_id: str) -> Summary | None:
         """Get a summary by ID."""
