@@ -68,18 +68,26 @@ def get_component_category(name: str) -> str:
     name_lower = name.lower()
     if any(x in name_lower for x in ['attention', 'query', 'key', 'value']):
         return 'attention'
-    if any(x in name_lower for x in ['mamba', 'ssm', 's4', 'state space']):
+    if any(x in name_lower for x in ['mamba', 'ssm', 's4', 'state space', 'selective']):
         return 'ssm'
-    if any(x in name_lower for x in ['position', 'rotary', 'rope', 'sinusoidal']):
+    if any(x in name_lower for x in ['position', 'rotary', 'rope', 'sinusoidal', 'alibi']):
         return 'position'
     if any(x in name_lower for x in ['norm', 'layer norm', 'rms']):
         return 'normalization'
-    if any(x in name_lower for x in ['ffn', 'feed forward', 'mlp', 'gelu']):
+    if any(x in name_lower for x in ['ffn', 'feed forward', 'mlp', 'swiglu']):
         return 'ffn'
     if any(x in name_lower for x in ['embed', 'token']):
         return 'embedding'
-    if any(x in name_lower for x in ['flash', 'efficient', 'sparse']):
+    if any(x in name_lower for x in ['flash', 'efficient', 'sparse', 'linear']):
         return 'efficiency'
+    if any(x in name_lower for x in ['moe', 'mixture', 'expert', 'router']):
+        return 'moe'
+    if any(x in name_lower for x in ['hyena', 'xlstm', 'lstm', 'gru', 'conv', 'rwkv']):
+        return 'alternative'
+    if any(x in name_lower for x in ['gelu', 'relu', 'silu', 'activation']):
+        return 'activation'
+    if any(x in name_lower for x in ['dropout', 'residual']):
+        return 'regularization'
     return 'other'
 
 
@@ -385,11 +393,17 @@ class SimpleComponent:
 
 
 def dream_architecture(db: ArcFusionDB, strategy: str = 'greedy',
-                       temperature: float = 0.3, max_components: int = 6) -> tuple[list, str]:
+                       temperature: float = 0.3, max_components: int = 8) -> tuple[list, str]:
     """Dream up an architecture using the specified strategy.
 
     Simplified dreamer that queries DB directly without full composer import.
     Returns: (components, strategy_name)
+
+    Strategies:
+    - greedy: Pick best from each category (with temperature-based randomness)
+    - random: Random sampling (weighted or uniform based on temperature)
+    - diverse: Explicitly try underutilized component categories
+    - exploratory: Mix of all categories with high randomness
     """
     # Get all components from DB
     rows = db.conn.execute(
@@ -412,14 +426,14 @@ def dream_architecture(db: ArcFusionDB, strategy: str = 'greedy',
     components = []
 
     if strategy == 'greedy':
-        # Greedy: pick best from each category
-        category_order = ['position', 'embedding', 'attention', 'ssm', 'normalization', 'ffn', 'efficiency']
+        # Greedy: pick best from each category (expanded categories)
+        category_order = ['position', 'embedding', 'attention', 'ssm', 'normalization',
+                         'ffn', 'efficiency', 'activation', 'regularization']
         for cat in category_order:
             if cat in by_category and len(components) < max_components:
-                # Pick best (first, since sorted by usefulness)
+                # Pick from top-k with temperature-based randomness
                 if temperature > 0 and len(by_category[cat]) > 1:
-                    # Add some randomness
-                    top_k = min(3, len(by_category[cat]))
+                    top_k = min(5, len(by_category[cat]))  # Increased from 3 to 5
                     components.append(random.choice(by_category[cat][:top_k]))
                 else:
                     components.append(by_category[cat][0])
@@ -428,10 +442,46 @@ def dream_architecture(db: ArcFusionDB, strategy: str = 'greedy',
         # Random walk: sample from all components
         weights = [1.0 / (i + 1) for i in range(len(all_components))]  # Favor higher scored
         for _ in range(max_components):
-            if temperature > 0.5:
+            if temperature > 0.3:  # Lower threshold for more randomness
                 comp = random.choice(all_components)
             else:
                 comp = random.choices(all_components, weights=weights)[0]
+            if comp not in components:
+                components.append(comp)
+
+    elif strategy == 'diverse':
+        # Diverse: explicitly try underutilized categories (MoE, alternative, other)
+        priority_categories = ['alternative', 'moe', 'other', 'efficiency', 'ssm']
+        fallback_categories = ['attention', 'position', 'embedding', 'normalization', 'ffn']
+
+        # First, try to get components from underutilized categories
+        for cat in priority_categories:
+            if cat in by_category and len(components) < max_components // 2:
+                if len(by_category[cat]) > 0:
+                    comp = random.choice(by_category[cat])
+                    if comp not in components:
+                        components.append(comp)
+
+        # Fill remaining slots from fallback categories
+        for cat in fallback_categories:
+            if cat in by_category and len(components) < max_components:
+                comp = random.choice(by_category[cat])
+                if comp not in components:
+                    components.append(comp)
+
+    elif strategy == 'exploratory':
+        # Exploratory: pure random from all categories, no weighting
+        available_cats = list(by_category.keys())
+        random.shuffle(available_cats)
+        for cat in available_cats:
+            if len(components) >= max_components:
+                break
+            comp = random.choice(by_category[cat])
+            if comp not in components:
+                components.append(comp)
+        # Fill any remaining with completely random components
+        while len(components) < max_components and len(all_components) > len(components):
+            comp = random.choice(all_components)
             if comp not in components:
                 components.append(comp)
 
@@ -638,11 +688,12 @@ def main():
     else:
         print("No surrogate model found, training without pre-screening")
 
-    # Configuration
-    n_candidates = 20 if use_surrogate else 3  # Dream many if screening
+    # Configuration - increased diversity settings
+    n_candidates = 30 if use_surrogate else 3  # Dream more for better coverage
     n_to_train = 3  # Only train top 3
     n_layers = 14  # Use 14 layers (good balance)
-    strategies = ['greedy', 'random']  # Alternate strategies
+    # Expanded strategy rotation for better search space coverage
+    strategies = ['greedy', 'random', 'diverse', 'exploratory']
 
     # Load existing candidate hashes to avoid re-dreaming
     existing_hashes = get_existing_candidate_hashes(db)
@@ -680,7 +731,8 @@ def main():
 
     while len(candidates) < n_candidates and attempt < max_attempts:
         strategy = strategies[attempt % len(strategies)]
-        temperature = 0.2 + (attempt * 0.03)  # Vary exploration more finely
+        # Higher temperature range for more exploration (0.4 to 1.0)
+        temperature = 0.4 + (attempt * 0.03)
 
         components, _ = dream_architecture(db, strategy=strategy, temperature=temperature)
         if components:
