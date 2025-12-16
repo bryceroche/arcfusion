@@ -800,6 +800,31 @@ class ArcFusionDB:
                 except sqlite3.OperationalError:
                     pass  # Column already exists or other issue
 
+        # Migration: Drop redundant columns from dream_candidates (now computed properties)
+        cursor = self.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='dream_candidates'"
+        )
+        if cursor.fetchone():
+            cursor = self.conn.execute("PRAGMA table_info(dream_candidates)")
+            dream_columns = {row[1] for row in cursor.fetchall()}
+
+            # Drop columns that are now derived from components_json
+            columns_to_drop = ['has_mamba', 'has_linear_attn', 'is_hybrid', 'arch_type']
+            for col in columns_to_drop:
+                if col in dream_columns:
+                    try:
+                        self.conn.execute(f"ALTER TABLE dream_candidates DROP COLUMN {col}")
+                        self.conn.commit()
+                    except sqlite3.OperationalError:
+                        pass  # Column doesn't exist or can't be dropped
+
+            # Drop the arch_type index if it exists
+            try:
+                self.conn.execute("DROP INDEX IF EXISTS idx_dream_cand_arch")
+                self.conn.commit()
+            except sqlite3.OperationalError:
+                pass
+
     # -------------------------------------------------------------------------
     # Component operations
     # -------------------------------------------------------------------------
