@@ -442,6 +442,38 @@ def get_architecture_hash(components: list) -> str:
     return hashlib.md5('|'.join(names).encode()).hexdigest()[:8]
 
 
+def get_existing_candidate_hashes(db: ArcFusionDB) -> set:
+    """Load all existing candidate component hashes from dream_candidates table."""
+    rows = db.conn.execute(
+        "SELECT components_json FROM dream_candidates"
+    ).fetchall()
+
+    hashes = set()
+    for (components_json,) in rows:
+        try:
+            names = sorted(json.loads(components_json))
+            h = hashlib.md5('|'.join(names).encode()).hexdigest()[:8]
+            hashes.add(h)
+        except (json.JSONDecodeError, TypeError):
+            continue
+    return hashes
+
+
+def get_untrained_promising_candidates(db: ArcFusionDB, limit: int = 5) -> list:
+    """Get candidates with good predicted PPL that were never trained.
+
+    Returns list of (candidate_id, components_json, predicted_ppl, predicted_time)
+    """
+    rows = db.conn.execute("""
+        SELECT candidate_id, components_json, predicted_ppl, predicted_time
+        FROM dream_candidates
+        WHERE was_trained = 0 AND predicted_ppl > 0
+        ORDER BY predicted_ppl ASC
+        LIMIT ?
+    """, (limit,)).fetchall()
+    return rows
+
+
 def dreamed_to_arch_features(components: list, n_layers: int = 10) -> ArchFeatures:
     """Convert dreamed components to ArchFeatures for surrogate model prediction."""
     categories = {}
@@ -606,6 +638,17 @@ def main():
     n_layers = 14  # Use 14 layers (good balance)
     strategies = ['greedy', 'random']  # Alternate strategies
 
+    # Load existing candidate hashes to avoid re-dreaming
+    existing_hashes = get_existing_candidate_hashes(db)
+    print(f"Found {len(existing_hashes)} previously dreamed architectures")
+
+    # Check for promising untrained candidates
+    untrained = get_untrained_promising_candidates(db, limit=n_to_train)
+    if untrained:
+        print(f"Found {len(untrained)} promising untrained candidates:")
+        for cid, comp_json, pred_ppl, pred_time in untrained:
+            print(f"  - {cid}: pred_ppl={pred_ppl:.1f}")
+
     # Get baseline for comparison
     baseline_runs = db.list_training_runs(model_name="Transformer_MHA", success_only=True, limit=1)
     if not baseline_runs:
@@ -618,22 +661,38 @@ def main():
     print()
     sys.stdout.flush()
 
-    # Phase 1: Dream many candidates
+    # Phase 1: Dream many candidates (skipping already-dreamed ones)
     print("=" * 70)
     print("PHASE 1: Dreaming candidate architectures")
     print("=" * 70)
 
     candidates = []
-    for i in range(n_candidates):
-        strategy = strategies[i % len(strategies)]
-        temperature = 0.2 + (i * 0.05)  # Vary exploration
+    skipped = 0
+    max_attempts = n_candidates * 3  # Try more to find novel ones
+    attempt = 0
+    session_hashes = set()  # Track hashes within this session too
+
+    while len(candidates) < n_candidates and attempt < max_attempts:
+        strategy = strategies[attempt % len(strategies)]
+        temperature = 0.2 + (attempt * 0.03)  # Vary exploration more finely
 
         components, _ = dream_architecture(db, strategy=strategy, temperature=temperature)
         if components:
-            candidates.append((components, strategy, temperature))
-            print(f"  [{i+1}/{n_candidates}] {strategy} (t={temperature:.2f}): {len(components)} components")
+            arch_hash = get_architecture_hash(components)
 
-    print(f"\nDreamed {len(candidates)} candidate architectures")
+            # Skip if already in DB or already dreamed this session
+            if arch_hash in existing_hashes or arch_hash in session_hashes:
+                skipped += 1
+                attempt += 1
+                continue
+
+            session_hashes.add(arch_hash)
+            candidates.append((components, strategy, temperature))
+            print(f"  [{len(candidates)}/{n_candidates}] {strategy} (t={temperature:.2f}): {len(components)} components")
+
+        attempt += 1
+
+    print(f"\nDreamed {len(candidates)} novel candidate architectures (skipped {skipped} duplicates)")
     sys.stdout.flush()
 
     # Phase 2: Screen with surrogate model and save all candidates to DB
