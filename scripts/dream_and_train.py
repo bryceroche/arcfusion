@@ -623,29 +623,13 @@ def save_all_candidates_to_db(db: ArcFusionDB, candidates_with_preds: list,
     candidate_map = {}
 
     for i, (components, strategy, temp, features, pred_ppl, pred_time) in enumerate(candidates_with_preds):
-        # Determine architecture type from features
-        if features.has_mamba:
-            arch_type = 'mamba'
-        elif features.has_linear_attn:
-            arch_type = 'linear'
-        elif features.n_kv_heads == 1:
-            arch_type = 'mqa'
-        elif features.n_kv_heads < features.n_heads:
-            arch_type = 'gqa'
-        else:
-            arch_type = 'mha'
-
-        # Create candidate
+        # Create candidate (arch_type, has_mamba, etc. are derived from components_json)
         candidate = DreamCandidate(
             strategy=strategy,
             temperature=temp,
             components_json=json.dumps([c.name for c in components]),
             n_layers=n_layers,
             n_kv_heads=features.n_kv_heads,
-            has_mamba=features.has_mamba,
-            has_linear_attn=features.has_linear_attn,
-            is_hybrid=features.is_hybrid,
-            arch_type=arch_type,
             predicted_ppl=pred_ppl,
             predicted_time=pred_time,
             was_trained=False,  # Will update later if trained

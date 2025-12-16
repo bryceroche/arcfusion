@@ -212,10 +212,6 @@ class DreamCandidate:
     # Architecture features for surrogate model
     n_layers: int = 4
     n_kv_heads: int = 8
-    has_mamba: bool = False
-    has_linear_attn: bool = False
-    is_hybrid: bool = False
-    arch_type: str = ""  # gqa, mha, mamba, linear, etc.
     # Surrogate predictions
     predicted_ppl: float = 0.0
     predicted_time: float = 0.0
@@ -233,6 +229,48 @@ class DreamCandidate:
         if not self.candidate_id:
             content = f"{self.strategy}{self.temperature}{self.components_json}{self.n_layers}"
             self.candidate_id = hashlib.sha256(content.encode()).hexdigest()[:12]
+
+    def get_components(self) -> list[str]:
+        """Parse components_json into a list of component names."""
+        if not self.components_json:
+            return []
+        try:
+            return json.loads(self.components_json)
+        except (json.JSONDecodeError, TypeError):
+            return []
+
+    @property
+    def has_mamba(self) -> bool:
+        """Check if architecture contains Mamba/SSM components."""
+        comps = ' '.join(self.get_components()).lower()
+        return any(x in comps for x in ['mamba', 'ssm', 's4', 'state space', 'selective'])
+
+    @property
+    def has_linear_attn(self) -> bool:
+        """Check if architecture contains linear attention."""
+        comps = ' '.join(self.get_components()).lower()
+        return 'linear' in comps and 'attention' in comps
+
+    @property
+    def is_hybrid(self) -> bool:
+        """Check if architecture is a hybrid (has both attention and SSM)."""
+        comps = ' '.join(self.get_components()).lower()
+        has_attn = 'attention' in comps
+        has_ssm = any(x in comps for x in ['mamba', 'ssm', 's4'])
+        return has_attn and has_ssm
+
+    @property
+    def arch_type(self) -> str:
+        """Derive architecture type from components and n_kv_heads."""
+        if self.has_mamba and not self.is_hybrid:
+            return 'mamba'
+        if self.has_linear_attn:
+            return 'linear'
+        if self.n_kv_heads == 1:
+            return 'mqa'
+        if self.n_kv_heads < 8:
+            return 'gqa'
+        return 'mha'
 
 
 @dataclass
@@ -660,13 +698,9 @@ class ArcFusionDB:
                 strategy TEXT NOT NULL,  -- greedy, random, crossover, mutate
                 temperature REAL DEFAULT 0.0,
                 components_json TEXT,  -- JSON list of component names
-                -- Architecture features
+                -- Architecture features (derived props like has_mamba computed from components_json)
                 n_layers INTEGER DEFAULT 4,
                 n_kv_heads INTEGER DEFAULT 8,
-                has_mamba INTEGER DEFAULT 0,
-                has_linear_attn INTEGER DEFAULT 0,
-                is_hybrid INTEGER DEFAULT 0,
-                arch_type TEXT,  -- gqa, mha, mamba, linear, etc.
                 -- Surrogate predictions
                 predicted_ppl REAL DEFAULT 0.0,
                 predicted_time REAL DEFAULT 0.0,
@@ -728,7 +762,6 @@ class ArcFusionDB:
             CREATE INDEX IF NOT EXISTS idx_dream_cand_strategy ON dream_candidates(strategy);
             CREATE INDEX IF NOT EXISTS idx_dream_cand_ppl ON dream_candidates(predicted_ppl);
             CREATE INDEX IF NOT EXISTS idx_dream_cand_trained ON dream_candidates(was_trained);
-            CREATE INDEX IF NOT EXISTS idx_dream_cand_arch ON dream_candidates(arch_type);
             CREATE INDEX IF NOT EXISTS idx_dream_cand_created ON dream_candidates(created_at DESC);
         """)
         self.conn.commit()
@@ -2391,11 +2424,11 @@ class ArcFusionDB:
         self.conn.execute("""
             INSERT INTO dream_candidates (
                 candidate_id, strategy, temperature, components_json,
-                n_layers, n_kv_heads, has_mamba, has_linear_attn, is_hybrid, arch_type,
+                n_layers, n_kv_heads,
                 predicted_ppl, predicted_time,
                 was_trained, training_run_id, actual_ppl, actual_time,
                 notes, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             candidate.candidate_id,
             candidate.strategy,
@@ -2403,10 +2436,6 @@ class ArcFusionDB:
             candidate.components_json,
             candidate.n_layers,
             candidate.n_kv_heads,
-            _bool_to_int(candidate.has_mamba),
-            _bool_to_int(candidate.has_linear_attn),
-            _bool_to_int(candidate.is_hybrid),
-            candidate.arch_type,
             candidate.predicted_ppl,
             candidate.predicted_time,
             _bool_to_int(candidate.was_trained),
@@ -2433,10 +2462,6 @@ class ArcFusionDB:
             components_json=row['components_json'] or "",
             n_layers=row['n_layers'],
             n_kv_heads=row['n_kv_heads'],
-            has_mamba=bool(row['has_mamba']),
-            has_linear_attn=bool(row['has_linear_attn']),
-            is_hybrid=bool(row['is_hybrid']),
-            arch_type=row['arch_type'] or "",
             predicted_ppl=row['predicted_ppl'],
             predicted_time=row['predicted_time'],
             was_trained=bool(row['was_trained']),
@@ -2481,20 +2506,16 @@ class ArcFusionDB:
         self,
         trained_only: bool = False,
         untrained_only: bool = False,
-        arch_type: str | None = None,
         limit: int = 100
     ) -> list[DreamCandidate]:
         """List dream candidates with optional filters."""
         query = "SELECT * FROM dream_candidates WHERE 1=1"
-        params = []
+        params: list = []
 
         if trained_only:
             query += " AND was_trained = 1"
         if untrained_only:
             query += " AND was_trained = 0"
-        if arch_type:
-            query += " AND arch_type = ?"
-            params.append(arch_type)
 
         query += " ORDER BY created_at DESC LIMIT ?"
         params.append(limit)
@@ -2506,10 +2527,6 @@ class ArcFusionDB:
             components_json=r['components_json'] or "",
             n_layers=r['n_layers'],
             n_kv_heads=r['n_kv_heads'],
-            has_mamba=bool(r['has_mamba']),
-            has_linear_attn=bool(r['has_linear_attn']),
-            is_hybrid=bool(r['is_hybrid']),
-            arch_type=r['arch_type'] or "",
             predicted_ppl=r['predicted_ppl'],
             predicted_time=r['predicted_time'],
             was_trained=bool(r['was_trained']),

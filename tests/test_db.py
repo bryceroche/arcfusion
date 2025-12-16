@@ -303,10 +303,6 @@ def test_add_dream_candidate(db):
         components_json='["Attention", "FFN", "LayerNorm"]',
         n_layers=10,
         n_kv_heads=8,
-        has_mamba=False,
-        has_linear_attn=False,
-        is_hybrid=False,
-        arch_type="mha",
         predicted_ppl=250.5,
         predicted_time=120.0,
         was_trained=False,
@@ -319,22 +315,25 @@ def test_add_dream_candidate(db):
     assert len(candidates) == 1
     assert candidates[0].strategy == "greedy"
     assert candidates[0].predicted_ppl == 250.5
+    # Verify derived properties work
+    assert candidates[0].arch_type == "mha"
+    assert not candidates[0].has_mamba
 
 
 def test_list_dream_candidates_filters(db):
     """Test listing dream candidates with various filters."""
-    # Add multiple candidates
-    for i, arch_type in enumerate(["mha", "gqa", "mamba"]):
+    # Add multiple candidates with different components
+    for i, (comp_json, n_kv) in enumerate([
+        ('["Attention", "FFN"]', 8),  # MHA
+        ('["GQA", "FFN"]', 2),  # GQA
+        ('["Mamba", "FFN"]', 0),  # Mamba
+    ]):
         candidate = DreamCandidate(
             strategy="greedy" if i % 2 == 0 else "random",
             temperature=0.1 * i,
-            components_json=f'["Component{i}"]',
+            components_json=comp_json,
             n_layers=10,
-            n_kv_heads=8 if arch_type != "mamba" else 0,
-            has_mamba=arch_type == "mamba",
-            has_linear_attn=False,
-            is_hybrid=False,
-            arch_type=arch_type,
+            n_kv_heads=n_kv,
             predicted_ppl=200.0 + i * 10,
             predicted_time=100.0,
             was_trained=i == 1,  # Only second one is trained
@@ -351,10 +350,10 @@ def test_list_dream_candidates_filters(db):
     assert len(trained) == 1
     assert trained[0].was_trained
 
-    # Test arch_type filter
-    mamba_candidates = db.list_dream_candidates(arch_type="mamba")
+    # Test derived properties
+    all_candidates = db.list_dream_candidates(limit=10)
+    mamba_candidates = [c for c in all_candidates if c.has_mamba]
     assert len(mamba_candidates) == 1
-    assert mamba_candidates[0].has_mamba
 
 
 def test_update_dream_candidate_predictions(db):
@@ -365,10 +364,6 @@ def test_update_dream_candidate_predictions(db):
         components_json='["Attention"]',
         n_layers=10,
         n_kv_heads=8,
-        has_mamba=False,
-        has_linear_attn=False,
-        is_hybrid=False,
-        arch_type="mha",
         predicted_ppl=300.0,
         predicted_time=150.0,
         was_trained=False,
@@ -393,10 +388,6 @@ def test_update_dream_candidate_training(db):
         components_json='["Attention"]',
         n_layers=10,
         n_kv_heads=8,
-        has_mamba=False,
-        has_linear_attn=False,
-        is_hybrid=False,
-        arch_type="mha",
         predicted_ppl=300.0,
         predicted_time=150.0,
         was_trained=False,
@@ -434,10 +425,6 @@ def test_get_surrogate_accuracy_stats_insufficient_data(db):
         components_json='["Attention"]',
         n_layers=10,
         n_kv_heads=8,
-        has_mamba=False,
-        has_linear_attn=False,
-        is_hybrid=False,
-        arch_type="mha",
         predicted_ppl=300.0,
         predicted_time=150.0,
         was_trained=True,
@@ -464,10 +451,6 @@ def test_get_surrogate_accuracy_stats_with_data(db):
             components_json=f'["Component{i}"]',
             n_layers=10,
             n_kv_heads=8,
-            has_mamba=False,
-            has_linear_attn=False,
-            is_hybrid=False,
-            arch_type="mha",
             predicted_ppl=pred_ppl,
             predicted_time=pred_time,
             was_trained=True,
