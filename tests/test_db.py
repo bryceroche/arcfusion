@@ -12,7 +12,7 @@ from arcfusion import (
     seed_transformers,
     seed_modern_architectures,
 )
-from arcfusion.db import Recipe, RecipeAdjustment
+from arcfusion.db import Recipe, RecipeAdjustment, DreamCandidate
 
 
 @pytest.fixture
@@ -292,3 +292,129 @@ def test_recipe_in_stats(db):
     stats = db.stats()
     assert stats["recipes"] == 1
     assert stats["recipe_adjustments"] == 1
+
+
+# Dream Candidate tests
+def test_add_dream_candidate(db):
+    """Test adding and retrieving a dream candidate."""
+    candidate = DreamCandidate(
+        strategy="greedy",
+        temperature=0.3,
+        components_json='["Attention", "FFN", "LayerNorm"]',
+        n_layers=10,
+        n_kv_heads=8,
+        has_mamba=False,
+        has_linear_attn=False,
+        is_hybrid=False,
+        arch_type="mha",
+        predicted_ppl=250.5,
+        predicted_time=120.0,
+        was_trained=False,
+    )
+    candidate_id = db.add_dream_candidate(candidate)
+    assert candidate_id == candidate.candidate_id
+
+    # Retrieve via list
+    candidates = db.list_dream_candidates(limit=10)
+    assert len(candidates) == 1
+    assert candidates[0].strategy == "greedy"
+    assert candidates[0].predicted_ppl == 250.5
+
+
+def test_list_dream_candidates_filters(db):
+    """Test listing dream candidates with various filters."""
+    # Add multiple candidates
+    for i, arch_type in enumerate(["mha", "gqa", "mamba"]):
+        candidate = DreamCandidate(
+            strategy="greedy" if i % 2 == 0 else "random",
+            temperature=0.1 * i,
+            components_json=f'["Component{i}"]',
+            n_layers=10,
+            n_kv_heads=8 if arch_type != "mamba" else 0,
+            has_mamba=arch_type == "mamba",
+            has_linear_attn=False,
+            is_hybrid=False,
+            arch_type=arch_type,
+            predicted_ppl=200.0 + i * 10,
+            predicted_time=100.0,
+            was_trained=i == 1,  # Only second one is trained
+        )
+        db.add_dream_candidate(candidate)
+
+    # Test untrained_only filter
+    untrained = db.list_dream_candidates(untrained_only=True)
+    assert len(untrained) == 2
+    assert all(not c.was_trained for c in untrained)
+
+    # Test trained_only filter
+    trained = db.list_dream_candidates(trained_only=True)
+    assert len(trained) == 1
+    assert trained[0].was_trained
+
+    # Test arch_type filter
+    mamba_candidates = db.list_dream_candidates(arch_type="mamba")
+    assert len(mamba_candidates) == 1
+    assert mamba_candidates[0].has_mamba
+
+
+def test_update_dream_candidate_predictions(db):
+    """Test updating predictions for a dream candidate."""
+    candidate = DreamCandidate(
+        strategy="greedy",
+        temperature=0.2,
+        components_json='["Attention"]',
+        n_layers=10,
+        n_kv_heads=8,
+        has_mamba=False,
+        has_linear_attn=False,
+        is_hybrid=False,
+        arch_type="mha",
+        predicted_ppl=300.0,
+        predicted_time=150.0,
+        was_trained=False,
+    )
+    candidate_id = db.add_dream_candidate(candidate)
+
+    # Update predictions
+    db.update_dream_candidate_predictions(candidate_id, 250.0, 120.0)
+
+    # Verify update
+    candidates = db.list_dream_candidates(limit=1)
+    assert len(candidates) == 1
+    assert candidates[0].predicted_ppl == 250.0
+    assert candidates[0].predicted_time == 120.0
+
+
+def test_update_dream_candidate_training(db):
+    """Test updating training results for a dream candidate."""
+    candidate = DreamCandidate(
+        strategy="greedy",
+        temperature=0.2,
+        components_json='["Attention"]',
+        n_layers=10,
+        n_kv_heads=8,
+        has_mamba=False,
+        has_linear_attn=False,
+        is_hybrid=False,
+        arch_type="mha",
+        predicted_ppl=300.0,
+        predicted_time=150.0,
+        was_trained=False,
+    )
+    candidate_id = db.add_dream_candidate(candidate)
+
+    # Update with training results
+    db.update_dream_candidate_training(
+        candidate_id=candidate_id,
+        training_run_id="run-12345",
+        actual_ppl=245.0,
+        actual_time=135.0
+    )
+
+    # Verify update
+    candidates = db.list_dream_candidates(trained_only=True)
+    assert len(candidates) == 1
+    assert candidates[0].was_trained
+    assert candidates[0].actual_ppl == 245.0
+    assert candidates[0].actual_time == 135.0
+    assert candidates[0].training_run_id == "run-12345"
