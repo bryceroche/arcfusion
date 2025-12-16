@@ -1619,6 +1619,35 @@ class ArcFusionDB:
         """, (limit,)).fetchall()
         return [self._row_to_training_run(r) for r in rows]
 
+    def get_efficiency_leaderboard(self, limit: int = 20, time_penalty: float = 0.5,
+                                    reference_time: float = 300.0) -> list[tuple[TrainingRun, float]]:
+        """Get top training runs by efficiency score (balances PPL and training time).
+
+        Efficiency = PPL * (time_seconds / reference_time) ^ time_penalty
+
+        Args:
+            limit: Number of results to return
+            time_penalty: Exponent for time penalty (0.5 = sqrt, lower = less penalty)
+            reference_time: Reference "good" training time in seconds
+
+        Returns:
+            List of (TrainingRun, efficiency_score) tuples, sorted by efficiency (lower is better)
+        """
+        rows = self.conn.execute("""
+            SELECT * FROM training_runs
+            WHERE success = 1 AND perplexity > 0 AND time_seconds > 0
+        """).fetchall()
+
+        results = []
+        for row in rows:
+            run = self._row_to_training_run(row)
+            efficiency = run.perplexity * (run.time_seconds / reference_time) ** time_penalty
+            results.append((run, efficiency))
+
+        # Sort by efficiency (lower is better) and return top N
+        results.sort(key=lambda x: x[1])
+        return results[:limit]
+
     def compare_to_baseline(self, run: TrainingRun, baseline: TrainingRun | None = None) -> float:
         """Calculate percentage difference from baseline. Negative = better."""
         if baseline is None:
