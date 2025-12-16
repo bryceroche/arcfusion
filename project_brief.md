@@ -3,7 +3,7 @@
 **Product Manager**: Claude (AI Agent)
 **Reporting To**: Bryce Roche
 **Project Status**: Active Development
-**Last Updated**: 2025-12-12
+**Last Updated**: 2025-12-16
 
 ---
 
@@ -13,40 +13,41 @@ Systematically harvest ML architecture knowledge from arXiv papers to build the 
 
 ---
 
-## Current State (Updated: 2025-12-12)
+## Current State (Updated: 2025-12-16)
 
 ### Database Stats
 | Metric | Value |
 |--------|-------|
-| Components | 21 |
-| Engines | 211 |
-| Relationships | 215 |
-| Papers Processed | 203 |
-| Recipes | 0 (new) |
-| Benchmarks | 0 |
+| Components | 60+ |
+| Engines | 9 (Transformer, BERT, LLaMA, Mistral-7B, GPT-2, RWKV, RetNet, Mamba, FlashAttention) |
+| Relationships | 130 |
+| Training Runs | 48 |
+| Best PPL | 217.1 (MHA32) |
+
+### Cloud Training Pipeline (NEW - 2025-12-16)
+- **Modal A100 GPU** - `scripts/cloud_train_fair.py` orchestrates remote training
+- **Model Templates** - `src/arcfusion/model_templates.py` generates GQA/MQA/MHA/Mamba code
+- **Dream & Train** - `scripts/dream_and_train.py` automates architecture exploration
+- **Results DB** - `training_runs` + `training_insights` tables track all experiments
+- **Key findings**: 32L optimal depth, GQA14 best efficiency, MambaFast 4.64x speedup
 
 ### What We Have (Completed)
 
 **Core Pipeline:**
-- **21 components** - MultiHeadAttention, Embedding, LayerNorm, RMSNorm, FeedForward, RotaryEmbedding, ResidualConnection, SelectiveSSM, SwiGLU, GroupedQueryAttention, SoftmaxOutput, RetentionHead, CausalMask, TimeMixing, ChannelMixing, Activation, Gating, Convolution, Linear_Attention, Dropout, Normalization
-- **211 engines** including landmark papers: Attention Is All You Need, BERT, GPT-3, Mamba, LLaMA 2, Mistral 7B, FlashAttention, ViT, Swin, Mixtral, Griffin, etc.
+- **60+ components** across 8 categories (attention, structure, layer, position, embedding, training, efficiency, output)
+- **9 curated engines** with full component relationships
 - **arXiv Fetcher** (`src/arcfusion/fetcher.py`) - Full paper fetching pipeline
 - **CLI `arcfusion ingest`** - Batch ingestion command with search/ID modes
 
 **Composer System:**
 - 4 dream strategies: greedy, random, mutate, crossover
-- **NEW: Recipe system** - Composer → ML Agent handoff format with:
-  - Ordered component IDs
-  - Assembly instructions (connections, residuals, shapes, categories)
-  - Strategy metadata for reproducibility
-- **NEW: RecipeAdjustment tracking** - Records ML Agent modifications during training
+- Recipe system for Composer → ML Agent handoff
+- RecipeAdjustment tracking for training modifications
 
-**Validation Pipeline:**
-- **`src/arcfusion/validator.py`** - Auto-validation of dreamed architectures
-- Builds PyTorch models from generated code
-- Trains on synthetic data with configurable hyperparameters
-- Computes perplexity and benchmarks
-- **Verified working**: Transformer builds and trains end-to-end from 7 DB components (1M params)
+**Training Pipeline:**
+- Modal A100 GPU training with automatic result logging
+- Model templates for GQA/MQA/MHA/Mamba architectures
+- Auto-generated insights from training results
 
 **Code Generation:**
 - **`src/arcfusion/codegen.py`** - Generates runnable PyTorch nn.Module code

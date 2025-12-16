@@ -94,11 +94,19 @@ python3 -m arcfusion.cli analyze --ids 1706.03762
 | File | Purpose |
 |------|---------|
 | `src/arcfusion/db.py` | Database schema, CRUD operations |
+| `src/arcfusion/model_templates.py` | GQA/MQA/MHA/Mamba code generation |
 | `src/arcfusion/analyzer.py` | LLM paper analysis |
 | `src/arcfusion/composer.py` | Dream engine strategies |
-| `src/arcfusion/dedup.py` | Fuzzy deduplication |
-| `src/arcfusion/cli.py` | Command-line interface |
-| `tests/test_analyzer.py` | Analyzer tests (no API calls) |
+| `scripts/dream_and_train.py` | Empirical architecture search pipeline |
+| `scripts/cloud_train_fair.py` | Modal A100 GPU training |
+
+### Cloud Training
+See **AGENTS.md → Empirical Architecture Search** for full pipeline docs.
+
+```bash
+# Run architecture search
+PYTHONUNBUFFERED=1 .venv-modal/bin/python scripts/dream_and_train.py
+```
 
 ### Testing Without API Key
 The test suite runs without requiring an API key:
