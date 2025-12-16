@@ -3569,8 +3569,8 @@ def generate_auto_insight(
     if match:
         layers = int(match.group(1))
 
-    # Get all successful runs for comparison
-    all_runs = db.list_training_runs(success_only=True, limit=100)
+    # Get all successful runs for comparison (use high limit for future-proofing)
+    all_runs = db.list_training_runs(success_only=True, limit=1000)
 
     # Check if this is the best for its attention type
     same_type_runs = [r for r in all_runs if attn_type in r.model_name and r.run_id != run_id]
