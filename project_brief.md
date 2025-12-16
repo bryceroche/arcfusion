@@ -18,7 +18,7 @@ Systematically harvest ML architecture knowledge from arXiv papers to build the 
 ### Database Stats
 | Metric | Value |
 |--------|-------|
-| Components | 60+ |
+| Components | 117 |
 | Engines | 9 (Transformer, BERT, LLaMA, Mistral-7B, GPT-2, RWKV, RetNet, Mamba, FlashAttention) |
 | Relationships | 130 |
 | Training Runs | 48 |
@@ -34,7 +34,7 @@ Systematically harvest ML architecture knowledge from arXiv papers to build the 
 ### What We Have (Completed)
 
 **Core Pipeline:**
-- **60+ components** across 8 categories (attention, structure, layer, position, embedding, training, efficiency, output)
+- **117 components** across 8 categories (attention, structure, layer, position, embedding, training, efficiency, output)
 - **9 curated engines** with full component relationships
 - **arXiv Fetcher** (`src/arcfusion/fetcher.py`) - Full paper fetching pipeline
 - **CLI `arcfusion ingest`** - Batch ingestion command with search/ID modes

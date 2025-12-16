@@ -198,7 +198,7 @@ Available in `scripts/`:
 ## Empirical Architecture Search
 
 The `dream_and_train.py` pipeline enables automated architecture exploration by:
-1. Dreaming component combinations from the 60+ components in the DB
+1. Dreaming component combinations from the 117 components in the DB
 2. Converting them to trainable PyTorch code
 3. Training on Modal A100 GPU
 4. Logging results + auto-generating insights
