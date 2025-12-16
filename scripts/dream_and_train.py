@@ -27,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from cloud_train_fair import CONFIG, app, train_model, save_result_to_db, generate_auto_insight
 from db import ArcFusionDB
+from surrogate_model import SurrogateModel, ArchFeatures, extract_features
 
 # Import composer components we need (avoiding full package import)
 # We'll use a simplified dreamer that queries the DB directly
@@ -441,11 +442,79 @@ def get_architecture_hash(components: list) -> str:
     return hashlib.md5('|'.join(names).encode()).hexdigest()[:8]
 
 
+def dreamed_to_arch_features(components: list, n_layers: int = 10) -> ArchFeatures:
+    """Convert dreamed components to ArchFeatures for surrogate model prediction."""
+    categories = {}
+    for comp in components:
+        cat = get_component_category(comp.name)
+        if cat not in categories:
+            categories[cat] = []
+        categories[cat].append(comp.name.lower())
+
+    # Determine attention type and KV heads
+    n_kv_heads = 8  # Default MHA
+    has_mamba = 'ssm' in categories
+    has_linear_attn = False
+    is_hybrid = False
+
+    if 'attention' in categories:
+        attn_names = ' '.join(categories['attention'])
+        if 'grouped query' in attn_names or 'gqa' in attn_names:
+            n_kv_heads = 2
+        elif 'multi-query' in attn_names or 'mqa' in attn_names:
+            n_kv_heads = 1
+        elif 'linear' in attn_names:
+            has_linear_attn = True
+
+    # Check for hybrid (both SSM and attention)
+    if has_mamba and 'attention' in categories:
+        is_hybrid = True
+
+    if has_mamba:
+        n_kv_heads = 0  # Mamba doesn't use KV
+
+    return ArchFeatures(
+        n_layers=n_layers,
+        n_kv_heads=n_kv_heads,
+        has_mamba=has_mamba,
+        has_linear_attn=has_linear_attn,
+        is_hybrid=is_hybrid,
+        is_fast_mamba=has_mamba,  # Assume parallel scan
+        d_model=256,
+        n_heads=8,
+    )
+
+
+def screen_candidates_with_surrogate(candidates: list, n_layers: int,
+                                      surrogate: SurrogateModel, top_k: int = 3) -> list:
+    """Screen candidates using surrogate model, return top_k best."""
+    import numpy as np
+
+    if not candidates:
+        return []
+
+    # Convert all candidates to features and predict
+    features_list = []
+    for components, strategy, temperature in candidates:
+        features = dreamed_to_arch_features(components, n_layers)
+        features_list.append((components, strategy, temperature, features))
+
+    # Predict PPL for all
+    X = np.array([f[3].to_vector() for f in features_list])
+    predictions = surrogate.predict(X)
+
+    # Rank by predicted PPL (lower is better)
+    ranked = sorted(zip(features_list, predictions), key=lambda x: x[1])
+
+    # Return top_k
+    return [(f[0], f[1], f[2], pred) for f, pred in ranked[:top_k]]
+
+
 def main():
     print("=" * 70)
-    print("DREAM & TRAIN PIPELINE")
+    print("DREAM & TRAIN PIPELINE (with Surrogate Screening)")
     print("=" * 70)
-    print("Dreaming architectures from component database and training on GPU")
+    print("Dreaming architectures, screening with surrogate model, training best on GPU")
     print()
     sys.stdout.flush()
 
@@ -453,9 +522,24 @@ def main():
     db_path = Path(__file__).parent.parent / "arcfusion.db"
     db = ArcFusionDB(str(db_path))
 
+    # Load surrogate model for screening
+    surrogate_path = Path(__file__).parent.parent / "surrogate_model.pkl"
+    surrogate = SurrogateModel()
+    use_surrogate = False
+    if surrogate_path.exists():
+        try:
+            surrogate.load(str(surrogate_path))
+            use_surrogate = True
+            print(f"Loaded surrogate model for candidate screening")
+        except Exception as e:
+            print(f"Warning: Could not load surrogate model: {e}")
+    else:
+        print("No surrogate model found, training without pre-screening")
+
     # Configuration
-    n_architectures = 3  # How many to dream and train
-    n_layers = 10  # Default layer count
+    n_candidates = 20 if use_surrogate else 3  # Dream many if screening
+    n_to_train = 3  # Only train top 3
+    n_layers = 14  # Use 14 layers (good balance)
     strategies = ['greedy', 'random']  # Alternate strategies
 
     # Get baseline for comparison
@@ -466,22 +550,61 @@ def main():
     baseline_run_id = baseline_runs[0].run_id if baseline_runs else ""
 
     print(f"Baseline PPL: {baseline_ppl:.1f}")
-    print(f"Will train {n_architectures} dreamed architectures")
+    print(f"Will dream {n_candidates} candidates, train top {n_to_train}")
     print()
+    sys.stdout.flush()
+
+    # Phase 1: Dream many candidates
+    print("=" * 70)
+    print("PHASE 1: Dreaming candidate architectures")
+    print("=" * 70)
+
+    candidates = []
+    for i in range(n_candidates):
+        strategy = strategies[i % len(strategies)]
+        temperature = 0.2 + (i * 0.05)  # Vary exploration
+
+        components, _ = dream_architecture(db, strategy=strategy, temperature=temperature)
+        if components:
+            candidates.append((components, strategy, temperature))
+            print(f"  [{i+1}/{n_candidates}] {strategy} (t={temperature:.2f}): {len(components)} components")
+
+    print(f"\nDreamed {len(candidates)} candidate architectures")
+    sys.stdout.flush()
+
+    # Phase 2: Screen with surrogate model
+    if use_surrogate and len(candidates) > n_to_train:
+        print(f"\n{'=' * 70}")
+        print("PHASE 2: Screening with surrogate model")
+        print("=" * 70)
+
+        screened = screen_candidates_with_surrogate(candidates, n_layers, surrogate, top_k=n_to_train)
+
+        print(f"\nTop {len(screened)} candidates by predicted PPL:")
+        for i, (components, strategy, temp, pred_ppl) in enumerate(screened):
+            comp_names = [c.name for c in components[:3]]
+            print(f"  {i+1}. {strategy} (t={temp:.2f}): pred={pred_ppl:.1f} PPL - {comp_names}...")
+
+        # Convert to format for training
+        to_train = [(c, s, t) for c, s, t, _ in screened]
+    else:
+        to_train = candidates[:n_to_train]
+
+    print()
+    sys.stdout.flush()
+
+    # Phase 3: Train selected architectures
+    print("=" * 70)
+    print(f"PHASE 3: Training {len(to_train)} selected architectures")
+    print("=" * 70)
 
     results = []
 
-    for i in range(n_architectures):
-        strategy = strategies[i % len(strategies)]
-        temperature = 0.3 + (i * 0.1)  # Increase exploration over iterations
-
-        print(f"\n{'=' * 70}")
-        print(f"DREAM {i+1}/{n_architectures}: Strategy={strategy}, Temperature={temperature:.1f}")
-        print("=" * 70)
+    for i, (components, strategy, temperature) in enumerate(to_train):
+        print(f"\n{'-' * 70}")
+        print(f"TRAIN {i+1}/{len(to_train)}: Strategy={strategy}, Temperature={temperature:.2f}")
+        print("-" * 70)
         sys.stdout.flush()
-
-        # Dream architecture
-        components, _ = dream_architecture(db, strategy=strategy, temperature=temperature)
 
         if not components:
             print("No components dreamed, skipping...")
