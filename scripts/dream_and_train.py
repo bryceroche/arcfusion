@@ -19,15 +19,17 @@ import json
 import hashlib
 import random
 from pathlib import Path
-from datetime import datetime
 
 # Add both paths for proper imports
 sys.path.insert(0, str(Path(__file__).parent.parent / "src" / "arcfusion"))
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from cloud_train_fair import CONFIG, app, train_model, save_result_to_db, generate_auto_insight
-from db import ArcFusionDB, DreamCandidate
+from cloud_train_fair import CONFIG, app, train_model, save_result_to_db
+from db import ArcFusionDB, DreamCandidate, TrainingInsight
 from surrogate_model import SurrogateModel, ArchFeatures, extract_features, retrain_if_needed
+
+# Default baseline PPL when no baseline runs exist
+DEFAULT_BASELINE_PPL = 280.0
 
 # Import composer components we need (avoiding full package import)
 # We'll use a simplified dreamer that queries the DB directly
@@ -58,7 +60,11 @@ COMPONENT_PATTERNS = {
 
 
 def get_component_category(name: str) -> str:
-    """Infer category from component name."""
+    """Infer category from component name.
+
+    Note: This is duplicated in surrogate_model.py. Consider refactoring
+    to a shared module if these diverge or need updates.
+    """
     name_lower = name.lower()
     if any(x in name_lower for x in ['attention', 'query', 'key', 'value']):
         return 'attention'
@@ -653,7 +659,7 @@ def main():
     baseline_runs = db.list_training_runs(model_name="Transformer_MHA", success_only=True, limit=1)
     if not baseline_runs:
         baseline_runs = db.list_training_runs(success_only=True, limit=1)
-    baseline_ppl = baseline_runs[0].perplexity if baseline_runs else 280.0
+    baseline_ppl = baseline_runs[0].perplexity if baseline_runs else DEFAULT_BASELINE_PPL
     baseline_run_id = baseline_runs[0].run_id if baseline_runs else ""
 
     print(f"Baseline PPL: {baseline_ppl:.1f}")
@@ -792,23 +798,21 @@ def main():
                     "vs_baseline_pct": ppl_diff
                 }
 
-                db.conn.execute("""
-                    INSERT INTO training_insights
-                    (insight_id, category, title, description, source_run_id, evidence_json, confidence, tags)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    f"dream-{arch_hash}",
-                    "dreamed_architecture",
-                    f"Dreamed: {model_name}",
-                    f"Architecture dreamed with {strategy} strategy (temp={temperature}). "
-                    f"Components: {', '.join(component_names)}. "
-                    f"Result: {ppl:.1f} PPL ({ppl_diff:+.1f}% vs baseline).",
-                    run_id,
-                    json.dumps(insight_data),
-                    0.7,
-                    f"dream,{strategy},{'-'.join([get_component_category(c.name) for c in components])}"
-                ))
-                db.conn.commit()
+                insight = TrainingInsight(
+                    insight_id=f"dream-{arch_hash}",
+                    category="dreamed_architecture",
+                    title=f"Dreamed: {model_name}",
+                    description=(
+                        f"Architecture dreamed with {strategy} strategy (temp={temperature}). "
+                        f"Components: {', '.join(component_names)}. "
+                        f"Result: {ppl:.1f} PPL ({ppl_diff:+.1f}% vs baseline)."
+                    ),
+                    source_run_id=run_id,
+                    evidence_json=json.dumps(insight_data),
+                    confidence=0.7,
+                    tags=f"dream,{strategy},{'-'.join([get_component_category(c.name) for c in components])}"
+                )
+                db.add_insight(insight)
 
                 # Update dream_candidate with actual training results
                 candidate_key = (strategy, temperature)
