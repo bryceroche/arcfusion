@@ -80,12 +80,12 @@ tk_h100_image = (
         "CXX": "g++",
         "CC": "gcc"
     })
-    # Clone TK but don't build yet (need GPU for proper compilation)
+    # Clone TK pre-FP4 and try scaled_matmul kernel
     .run_commands(
-        "git clone --depth 1 https://github.com/HazyResearch/ThunderKittens.git /opt/thunderkittens",
-        # Try fp8_gemm kernel (attn and mamba2 have broken make_causal issue #163)
-        # fp8_gemm is a simple matrix multiply, might compile
-        "cd /opt/thunderkittens && cat config.py"  # Keep default fp8_gemm
+        "git clone https://github.com/HazyResearch/ThunderKittens.git /opt/thunderkittens",
+        "cd /opt/thunderkittens && git checkout 97214f66",  # Before "Add FP4 type support"
+        # Try scaled_matmul - simpler torch-scaled kernel
+        "cd /opt/thunderkittens && sed -i \"s/kernels = \\['fp8_gemm'\\]/kernels = ['scaled_matmul']/\" config.py"
     )
 )
 
