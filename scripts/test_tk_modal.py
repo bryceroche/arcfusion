@@ -51,9 +51,10 @@ tk_image = (
 )
 
 # H100 image with TK source cloned (build happens at runtime with GPU)
+# Use CUDA 12.6 - what TK team develops on
 tk_h100_image = (
     modal.Image.from_registry(
-        "nvidia/cuda:12.4.0-devel-ubuntu22.04",
+        "nvidia/cuda:12.6.0-devel-ubuntu22.04",
         add_python="3.11"
     )
     .apt_install("git", "gcc-11", "g++-11", "make", "ninja-build", "cmake")
@@ -61,25 +62,30 @@ tk_h100_image = (
         "update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-11 100",
         "update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-11 100"
     )
+    # PyTorch 2.5.1 - most recent stable, good CUDA 12 support
     .pip_install(
-        "torch==2.4.0",
+        "torch==2.5.1",
         "numpy",
         "ninja",
-        "triton>=2.0",
-        "packaging"
+        "triton>=3.0",
+        "packaging",
+        "wheel",
+        "setuptools>=61.0"
     )
     .env({
         "CUDA_HOME": "/usr/local/cuda",
         "PATH": "/usr/local/cuda/bin:$PATH",
         "LD_LIBRARY_PATH": "/usr/local/cuda/lib64:$LD_LIBRARY_PATH",
-        "TORCH_CUDA_ARCH_LIST": "9.0",  # H100 architecture
+        "TORCH_CUDA_ARCH_LIST": "9.0a",  # H100 sm_90a for TMA
         "CXX": "g++",
         "CC": "gcc"
     })
     # Clone TK but don't build yet (need GPU for proper compilation)
     .run_commands(
         "git clone --depth 1 https://github.com/HazyResearch/ThunderKittens.git /opt/thunderkittens",
-        "cd /opt/thunderkittens && sed -i \"s/kernels = \\['fp8_gemm'\\]/kernels = ['attn']/\" config.py"
+        # Try fp8_gemm kernel (attn and mamba2 have broken make_causal issue #163)
+        # fp8_gemm is a simple matrix multiply, might compile
+        "cd /opt/thunderkittens && cat config.py"  # Keep default fp8_gemm
     )
 )
 
@@ -530,16 +536,40 @@ def benchmark_tk_h100(
         print("✓ ThunderKittens module found")
     except ImportError:
         # Build TK at runtime (with GPU present)
-        print("Building ThunderKittens from source (this takes ~2 min)...")
+        print("Building ThunderKittens from source...")
+        print(f"GPU detected: {torch.cuda.get_device_name(0)}")
+        print(f"CUDA version: {torch.version.cuda}")
         results["tk_build_attempted"] = True
 
         try:
             os.chdir("/opt/thunderkittens")
+
+            # Check config
+            print("\n=== TK Config ===")
+            with open("config.py") as f:
+                print(f.read())
+
+            # Build directly with setup.py to see all output
+            print("\n=== Building TK (direct setup.py) ===")
+            # H100 uses sm_90a (the 'a' is critical for TMA features)
             result = subprocess.run(
                 [sys.executable, "setup.py", "install"],
-                capture_output=True, text=True, timeout=300,
-                env={**os.environ, "CXX": "g++", "CC": "gcc"}
+                capture_output=True, text=True, timeout=600,
+                env={**os.environ, "CXX": "g++", "CC": "gcc", "TORCH_CUDA_ARCH_LIST": "9.0a"}
             )
+
+            # Combine output for full picture - search for actual errors
+            full_output = result.stdout + "\n=== STDERR ===\n" + result.stderr
+
+            # Extract lines containing "error:" to show actual compilation errors
+            error_lines = [line for line in full_output.split('\n') if 'error:' in line.lower() or 'error #' in line]
+            if error_lines:
+                print(f"=== COMPILATION ERRORS ({len(error_lines)} found) ===")
+                for line in error_lines[:30]:  # First 30 errors
+                    print(line)
+
+            print(f"\nBuild output (last 8000 chars):\n{full_output[-8000:]}")
+
             if result.returncode == 0:
                 print("✓ TK build succeeded!")
                 results["tk_build_success"] = True
@@ -548,8 +578,8 @@ def benchmark_tk_h100(
                 import thunderkittens
                 results["tk_available"] = True
             else:
-                print(f"✗ TK build failed: {result.stderr[-500:]}")
-                results["tk_build_error"] = result.stderr[-1000:]
+                print(f"✗ TK build failed with code {result.returncode}")
+                results["tk_build_error"] = result.stderr[-2000:]
         except Exception as e:
             print(f"✗ TK build exception: {e}")
             results["tk_build_error"] = str(e)
