@@ -44,15 +44,42 @@ tk_image = (
         "LD_LIBRARY_PATH": "/usr/local/cuda/lib64:$LD_LIBRARY_PATH",
         "TORCH_CUDA_ARCH_LIST": "8.0"  # A100 architecture
     })
-    # Clone and build ThunderKittens for A100
+    # Note: TK doesn't support A100 - this image is for fallback testing only
+    .run_commands(
+        "echo 'TK requires H100 - this image uses SDPA fallback'"
+    )
+)
+
+# H100 image with TK source cloned (build happens at runtime with GPU)
+tk_h100_image = (
+    modal.Image.from_registry(
+        "nvidia/cuda:12.4.0-devel-ubuntu22.04",
+        add_python="3.11"
+    )
+    .apt_install("git", "gcc-11", "g++-11", "make", "ninja-build", "cmake")
+    .run_commands(
+        "update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-11 100",
+        "update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-11 100"
+    )
+    .pip_install(
+        "torch==2.4.0",
+        "numpy",
+        "ninja",
+        "triton>=2.0",
+        "packaging"
+    )
+    .env({
+        "CUDA_HOME": "/usr/local/cuda",
+        "PATH": "/usr/local/cuda/bin:$PATH",
+        "LD_LIBRARY_PATH": "/usr/local/cuda/lib64:$LD_LIBRARY_PATH",
+        "TORCH_CUDA_ARCH_LIST": "9.0",  # H100 architecture
+        "CXX": "g++",
+        "CC": "gcc"
+    })
+    # Clone TK but don't build yet (need GPU for proper compilation)
     .run_commands(
         "git clone --depth 1 https://github.com/HazyResearch/ThunderKittens.git /opt/thunderkittens",
-        # Configure for A100 (sm_80) and add attention kernel
-        "cd /opt/thunderkittens && sed -i \"s/target = 'h100'/target = 'a100'/\" config.py",
-        "cd /opt/thunderkittens && sed -i \"s/kernels = \\['fp8_gemm'\\]/kernels = ['attn_fwd', 'attn_bwd']/\" config.py || true",
-        "cat /opt/thunderkittens/config.py || true",
-        # Build with verbose output
-        "cd /opt/thunderkittens && python setup.py install 2>&1 || echo 'TK build failed'"
+        "cd /opt/thunderkittens && sed -i \"s/kernels = \\['fp8_gemm'\\]/kernels = ['attn']/\" config.py"
     )
 )
 
@@ -452,6 +479,148 @@ def benchmark_tk_attention(
             speedup = results["sdpa"]["per_iter_ms"] / results["tk"]["per_iter_ms"]
             results["speedup"] = speedup
             print(f"  Speedup: {speedup:.2f}x")
+
+    results["config"] = {
+        "batch_size": batch_size,
+        "seq_len": seq_len,
+        "d_model": d_model,
+        "n_heads": n_heads,
+        "head_dim": head_dim,
+        "device": torch.cuda.get_device_name(0),
+        "dtype": str(dtype)
+    }
+
+    return results
+
+
+@app.function(image=tk_h100_image, gpu="H100", timeout=900)
+def benchmark_tk_h100(
+    batch_size: int = 4,
+    seq_len: int = 1024,
+    d_model: int = 512,
+    n_heads: int = 8,
+    iterations: int = 100,
+    warmup: int = 20
+):
+    """Benchmark ThunderKittens attention on H100 - the supported platform."""
+    import torch
+    import torch.nn.functional as F
+    import subprocess
+    import os
+    import sys
+
+    device = "cuda"
+    dtype = torch.float16
+
+    print(f"Benchmarking on {torch.cuda.get_device_name(0)}")
+    print(f"Config: B={batch_size}, N={seq_len}, D={d_model}, H={n_heads}")
+
+    results = {
+        "gpu": torch.cuda.get_device_name(0),
+        "tk_available": False,
+        "tk_build_attempted": False,
+        "sdpa": {},
+        "tk": {},
+    }
+
+    # Try to import ThunderKittens, build if needed
+    try:
+        import thunderkittens
+        results["tk_available"] = True
+        print("✓ ThunderKittens module found")
+    except ImportError:
+        # Build TK at runtime (with GPU present)
+        print("Building ThunderKittens from source (this takes ~2 min)...")
+        results["tk_build_attempted"] = True
+
+        try:
+            os.chdir("/opt/thunderkittens")
+            result = subprocess.run(
+                [sys.executable, "setup.py", "install"],
+                capture_output=True, text=True, timeout=300,
+                env={**os.environ, "CXX": "g++", "CC": "gcc"}
+            )
+            if result.returncode == 0:
+                print("✓ TK build succeeded!")
+                results["tk_build_success"] = True
+                # Reload to pick up the new install
+                import importlib
+                import thunderkittens
+                results["tk_available"] = True
+            else:
+                print(f"✗ TK build failed: {result.stderr[-500:]}")
+                results["tk_build_error"] = result.stderr[-1000:]
+        except Exception as e:
+            print(f"✗ TK build exception: {e}")
+            results["tk_build_error"] = str(e)
+
+    # Try to get attention kernel
+    tk_attn = None
+    if results.get("tk_available"):
+        try:
+            from thunderkittens import attention as tk_attn
+            results["tk_attention_available"] = True
+            print("✓ ThunderKittens attention kernel loaded")
+        except ImportError as e:
+            results["tk_attention_available"] = False
+            results["tk_attention_error"] = str(e)
+            print(f"⚠ TK attention import error: {e}")
+
+    # Create test tensors
+    head_dim = d_model // n_heads
+    q = torch.randn(batch_size, n_heads, seq_len, head_dim, device=device, dtype=dtype)
+    k = torch.randn(batch_size, n_heads, seq_len, head_dim, device=device, dtype=dtype)
+    v = torch.randn(batch_size, n_heads, seq_len, head_dim, device=device, dtype=dtype)
+
+    # Benchmark SDPA baseline
+    print(f"\nBenchmarking PyTorch SDPA ({iterations} iterations)...")
+    for _ in range(warmup):
+        with torch.no_grad():
+            _ = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+    torch.cuda.synchronize()
+
+    torch.cuda.synchronize()
+    start = time.perf_counter()
+    for _ in range(iterations):
+        with torch.no_grad():
+            _ = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+    torch.cuda.synchronize()
+    elapsed = time.perf_counter() - start
+
+    results["sdpa"] = {
+        "per_iter_ms": elapsed * 1000 / iterations,
+        "throughput": iterations / elapsed
+    }
+    print(f"  SDPA: {results['sdpa']['per_iter_ms']:.3f} ms/iter")
+
+    # Benchmark TK if available
+    if results.get("tk_attention_available") and tk_attn is not None:
+        print(f"\nBenchmarking ThunderKittens ({iterations} iterations)...")
+
+        for _ in range(warmup):
+            with torch.no_grad():
+                _ = tk_attn(q, k, v, causal=True)
+        torch.cuda.synchronize()
+
+        torch.cuda.synchronize()
+        start = time.perf_counter()
+        for _ in range(iterations):
+            with torch.no_grad():
+                _ = tk_attn(q, k, v, causal=True)
+        torch.cuda.synchronize()
+        elapsed = time.perf_counter() - start
+
+        results["tk"] = {
+            "per_iter_ms": elapsed * 1000 / iterations,
+            "throughput": iterations / elapsed
+        }
+        print(f"  TK: {results['tk']['per_iter_ms']:.3f} ms/iter")
+
+        # Compute speedup
+        if results["sdpa"]["per_iter_ms"] > 0:
+            speedup = results["sdpa"]["per_iter_ms"] / results["tk"]["per_iter_ms"]
+            results["speedup"] = speedup
+            print(f"  TK Speedup vs SDPA: {speedup:.2f}x")
 
     results["config"] = {
         "batch_size": batch_size,
