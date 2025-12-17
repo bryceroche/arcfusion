@@ -36,7 +36,7 @@ st.sidebar.markdown("ML Architecture Component Database")
 
 page = st.sidebar.radio(
     "Navigate",
-    ["📊 Overview", "🧩 Components", "🏗️ Engines", "🏆 Leaderboard", "💭 Dream Candidates", "📈 Surrogate Model"]
+    ["📊 Overview", "🧩 Components", "🏗️ Engines", "🏆 Leaderboard", "💭 Dream Candidates", "📈 Surrogate Model", "📚 Findings", "📋 Issues"]
 )
 
 # Helper functions
@@ -215,31 +215,9 @@ elif page == "🏗️ Engines":
 elif page == "🏆 Leaderboard":
     st.title("🏆 Training Leaderboard")
 
-    tab1, tab2 = st.tabs(["📉 By Perplexity", "⚡ By Efficiency"])
+    tab1, tab2 = st.tabs(["⚡ By Efficiency", "📉 By Perplexity"])
 
     with tab1:
-        st.subheader("Top Models by Perplexity (lower is better)")
-        runs = db.get_training_leaderboard(limit=20)
-        if runs:
-            data = [{
-                'Rank': i+1,
-                'Model': r.model_name,
-                'PPL': f"{r.perplexity:.1f}",
-                'Time (s)': f"{r.time_seconds:.1f}",
-                'Date': r.created_at[:10] if r.created_at else 'Unknown'
-            } for i, r in enumerate(runs)]
-            st.dataframe(pd.DataFrame(data), use_container_width=True)
-
-            # Chart
-            chart_data = [{'Model': r.model_name[:30], 'PPL': r.perplexity} for r in runs[:15]]
-            fig = px.bar(pd.DataFrame(chart_data), x='Model', y='PPL',
-                        title="Top 15 Models by Perplexity")
-            fig.update_xaxes(tickangle=45)
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("No training runs found")
-
-    with tab2:
         st.subheader("Top Models by Efficiency (lower is better)")
         st.caption("Efficiency = PPL × √(time/300s) — balances quality and speed")
 
@@ -266,6 +244,28 @@ elif page == "🏆 Leaderboard":
                            hover_name='Model', color='Efficiency',
                            title="PPL vs Time (bubble size = efficiency score)",
                            color_continuous_scale='RdYlGn_r')
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No training runs found")
+
+    with tab2:
+        st.subheader("Top Models by Perplexity (lower is better)")
+        runs = db.get_training_leaderboard(limit=20)
+        if runs:
+            data = [{
+                'Rank': i+1,
+                'Model': r.model_name,
+                'PPL': f"{r.perplexity:.1f}",
+                'Time (s)': f"{r.time_seconds:.1f}",
+                'Date': r.created_at[:10] if r.created_at else 'Unknown'
+            } for i, r in enumerate(runs)]
+            st.dataframe(pd.DataFrame(data), use_container_width=True)
+
+            # Chart
+            chart_data = [{'Model': r.model_name[:30], 'PPL': r.perplexity} for r in runs[:15]]
+            fig = px.bar(pd.DataFrame(chart_data), x='Model', y='PPL',
+                        title="Top 15 Models by Perplexity")
+            fig.update_xaxes(tickangle=45)
             st.plotly_chart(fig, use_container_width=True)
         else:
             st.info("No training runs found")
@@ -395,6 +395,180 @@ elif page == "📈 Surrogate Model":
                 fig.add_shape(type='line', x0=0, y0=0, x1=max_val, y1=max_val,
                             line=dict(dash='dash', color='gray'))
                 st.plotly_chart(fig, use_container_width=True)
+
+
+# =============================================================================
+# Findings Page
+# =============================================================================
+elif page == "📚 Findings":
+    st.title("📚 Research Findings")
+    st.caption("Accumulated knowledge from architecture experiments")
+
+    # Get all findings
+    findings = db.list_findings(limit=100)
+
+    if not findings:
+        st.info("No findings recorded yet. Run experiments and add findings to build knowledge base.")
+    else:
+        # Summary metrics
+        col1, col2, col3 = st.columns(3)
+        high_conf = sum(1 for f in findings if f.confidence == 'high')
+        with_delta = [f for f in findings if f.delta_vs_baseline != 0]
+        avg_delta = sum(f.delta_vs_baseline for f in with_delta) / len(with_delta) if with_delta else 0
+
+        with col1:
+            st.metric("Total Findings", len(findings))
+        with col2:
+            st.metric("High Confidence", high_conf)
+        with col3:
+            st.metric("Avg PPL Delta", f"{avg_delta:.1f}%")
+
+        st.divider()
+
+        # Get all unique tags
+        all_tags = set()
+        for f in findings:
+            if isinstance(f.tags, list):
+                all_tags.update(f.tags)
+
+        # Filter controls
+        col1, col2 = st.columns([2, 1])
+        with col1:
+            selected_tags = st.multiselect("Filter by tags", sorted(all_tags), default=[])
+        with col2:
+            sort_by = st.selectbox("Sort by", ["Date (newest)", "Confidence", "PPL Delta"])
+
+        # Filter findings
+        filtered = findings
+        if selected_tags:
+            filtered = [f for f in findings
+                       if isinstance(f.tags, list) and any(t in f.tags for t in selected_tags)]
+
+        # Sort findings
+        if sort_by == "Confidence":
+            conf_order = {'high': 0, 'medium': 1, 'low': 2}
+            filtered = sorted(filtered, key=lambda f: conf_order.get(f.confidence, 3))
+        elif sort_by == "PPL Delta":
+            filtered = sorted(filtered, key=lambda f: f.delta_vs_baseline)
+
+        st.write(f"Showing {len(filtered)} findings")
+
+        # Display findings
+        for f in filtered:
+            confidence_color = "green" if f.confidence == 'high' else "orange" if f.confidence == 'medium' else "red"
+            delta_str = f"{f.delta_vs_baseline:+.1f}%" if f.delta_vs_baseline != 0 else ""
+            delta_color = "green" if f.delta_vs_baseline < 0 else "red" if f.delta_vs_baseline > 0 else ""
+
+            with st.expander(f"**{f.title}**"):
+                cols = st.columns([1, 1, 2])
+                with cols[0]:
+                    st.markdown(f"**Confidence:** :{confidence_color}[{f.confidence}]")
+                with cols[1]:
+                    if delta_str:
+                        st.markdown(f"**PPL Delta:** :{delta_color}[{delta_str}]")
+                with cols[2]:
+                    if isinstance(f.tags, list) and f.tags:
+                        st.markdown(f"**Tags:** {', '.join(f.tags)}")
+
+                if f.description:
+                    st.markdown(f.description)
+
+                st.caption(f"Created: {f.created_at[:10] if f.created_at else 'Unknown'}")
+
+        # Architecture patterns section
+        st.divider()
+        st.subheader("🎯 Active Architecture Patterns")
+        st.caption("Recommendations derived from findings for architecture search")
+
+        patterns = db.get_architecture_patterns()
+        if patterns:
+            for p in patterns:
+                rec_display = p['recommendation'].replace('_', ' ').title()
+                st.markdown(f"- **{rec_display}**: {p['pattern'][:80]}...")
+        else:
+            st.info("No actionable patterns derived yet")
+
+        # Efficiency constraints
+        st.subheader("⚡ Efficiency Constraints")
+        constraints = db.get_efficiency_constraints()
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("Max Slowdown", f"{constraints['max_slowdown']}x")
+            st.metric("Baseline Time", f"{constraints['baseline_time']:.0f}s")
+        with col2:
+            st.metric("Min PPL Gain (for slow)", f"{constraints['min_ppl_gain_for_slow']*100:.0f}%")
+            st.metric("Baseline PPL", f"{constraints['baseline_ppl']:.0f}")
+
+
+# =============================================================================
+# Issues Page
+# =============================================================================
+elif page == "📋 Issues":
+    st.title("📋 Project Issues (Beads)")
+
+    # Load issues from .beads/issues.jsonl
+    issues_path = Path(__file__).parent.parent / ".beads" / "issues.jsonl"
+    issues = []
+    if issues_path.exists():
+        with open(issues_path) as f:
+            for line in f:
+                if line.strip():
+                    issues.append(json.loads(line))
+
+    if not issues:
+        st.info("No issues found in .beads/issues.jsonl")
+    else:
+        # Separate by status
+        open_issues = [i for i in issues if i.get('status') == 'open']
+        in_progress = [i for i in issues if i.get('status') == 'in_progress']
+        closed_issues = [i for i in issues if i.get('status') == 'closed']
+
+        # Summary metrics
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Open", len(open_issues))
+        with col2:
+            st.metric("In Progress", len(in_progress))
+        with col3:
+            st.metric("Closed", len(closed_issues))
+        with col4:
+            st.metric("Total", len(issues))
+
+        st.divider()
+
+        # Tabs for different statuses
+        tab1, tab2, tab3 = st.tabs(["🔴 Open", "🟡 In Progress", "✅ Closed"])
+
+        def render_issue(issue):
+            priority = issue.get('priority', 3)
+            priority_badge = "🔥" if priority == 1 else "⚡" if priority == 2 else ""
+            issue_type = issue.get('issue_type', 'task')
+            type_color = "blue" if issue_type == 'feature' else "green" if issue_type == 'task' else "red"
+
+            with st.expander(f"{priority_badge} **{issue['id']}**: {issue['title']}"):
+                st.caption(f"Type: :{type_color}[{issue_type}] | Priority: P{priority}")
+                if issue.get('description'):
+                    st.markdown(issue['description'][:500] + ('...' if len(issue.get('description', '')) > 500 else ''))
+                st.caption(f"Created: {issue.get('created_at', 'Unknown')[:10]}")
+
+        with tab1:
+            if open_issues:
+                for issue in sorted(open_issues, key=lambda x: x.get('priority', 3)):
+                    render_issue(issue)
+            else:
+                st.success("No open issues!")
+
+        with tab2:
+            if in_progress:
+                for issue in in_progress:
+                    render_issue(issue)
+            else:
+                st.info("No issues in progress")
+
+        with tab3:
+            st.caption(f"Showing last 20 of {len(closed_issues)} closed issues")
+            for issue in sorted(closed_issues, key=lambda x: x.get('closed_at', ''), reverse=True)[:20]:
+                render_issue(issue)
 
 
 # Footer

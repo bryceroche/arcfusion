@@ -433,6 +433,7 @@ def dream_architecture(db: ArcFusionDB, strategy: str = 'greedy',
     - random: Random sampling (weighted or uniform based on temperature)
     - diverse: Explicitly try underutilized component categories
     - exploratory: Mix of all categories with high randomness
+    - findings_guided: Use findings DB patterns to guide architecture design
     """
     # Get all components from DB
     rows = db.conn.execute(
@@ -513,6 +514,54 @@ def dream_architecture(db: ArcFusionDB, strategy: str = 'greedy',
             comp = random.choice(all_components)
             if comp not in components:
                 components.append(comp)
+
+    elif strategy == 'findings_guided':
+        # Findings-guided: use patterns from findings DB to guide architecture
+        patterns = db.get_architecture_patterns()
+        recommendations = {p['recommendation'] for p in patterns}
+
+        # Build architecture based on learned patterns
+        # Pattern: favor_mamba_layers - prefer SSM components
+        favor_mamba = 'favor_mamba_layers' in recommendations
+        # Pattern: place_attention_at_end - put attention last
+        attention_at_end = 'place_attention_at_end' in recommendations
+        # Pattern: prefer_gqa_mamba_hybrid - mix GQA with Mamba
+        prefer_hybrid = 'prefer_gqa_mamba_hybrid' in recommendations
+
+        # Start with standard components
+        if 'position' in by_category:
+            components.append(random.choice(by_category['position'][:3]))
+        if 'embedding' in by_category:
+            components.append(random.choice(by_category['embedding'][:3]))
+
+        # Middle layers: favor Mamba/SSM if pattern says so
+        if favor_mamba and 'ssm' in by_category:
+            # Add multiple SSM layers (pattern: more mamba = better)
+            ssm_count = min(3, len(by_category['ssm']), max_components - len(components) - 2)
+            for _ in range(ssm_count):
+                comp = random.choice(by_category['ssm'])
+                if comp not in components:
+                    components.append(comp)
+
+        # Add hybrid attention if pattern suggests
+        if prefer_hybrid and 'attention' in by_category:
+            # Look for GQA specifically
+            gqa_comps = [c for c in by_category['attention'] if 'gqa' in c.name.lower() or 'group' in c.name.lower()]
+            if gqa_comps:
+                components.append(random.choice(gqa_comps))
+            elif not attention_at_end:
+                components.append(random.choice(by_category['attention'][:3]))
+
+        # Fill with normalization/ffn
+        for cat in ['normalization', 'ffn']:
+            if cat in by_category and len(components) < max_components - 1:
+                components.append(random.choice(by_category[cat][:3]))
+
+        # Pattern: place attention at end
+        if attention_at_end and 'attention' in by_category:
+            attn_comp = random.choice(by_category['attention'][:3])
+            if attn_comp not in components:
+                components.append(attn_comp)
 
     else:
         # Default: just take top components
@@ -615,8 +664,12 @@ def compute_efficiency(ppl: float, time_s: float, baseline_time: float = 300.0) 
 
 def screen_candidates_with_surrogate(candidates: list, n_layers: int,
                                       surrogate: SurrogateModel, top_k: int = 3,
-                                      screen_by: str = "efficiency") -> tuple[list, list]:
-    """Screen candidates using surrogate model.
+                                      screen_by: str = "efficiency",
+                                      max_slowdown: float = 1.5,
+                                      min_ppl_gain_for_slow: float = 0.30,  # 30% PPL gain required for slow models
+                                      baseline_time: float = 300.0,
+                                      baseline_ppl: float = 282.0) -> tuple[list, list]:
+    """Screen candidates using surrogate model with efficiency constraints.
 
     Args:
         candidates: List of (components, strategy, temperature)
@@ -624,6 +677,10 @@ def screen_candidates_with_surrogate(candidates: list, n_layers: int,
         surrogate: Trained surrogate model
         top_k: Number of top candidates to return
         screen_by: Ranking method - "ppl", "efficiency", or "time"
+        max_slowdown: Max allowed slowdown vs baseline (default 1.5x)
+        min_ppl_gain_for_slow: Min PPL improvement to allow slower models (default 15%)
+        baseline_time: Reference time for slowdown calculation (default 300s)
+        baseline_ppl: Reference PPL for gain calculation (default 282.0 for MHA)
 
     Returns: (top_k_candidates, all_candidates_with_predictions)
     """
@@ -647,15 +704,28 @@ def screen_candidates_with_surrogate(candidates: list, n_layers: int,
     all_with_preds = [(f[0], f[1], f[2], f[3], ppl, time)
                        for f, ppl, time in zip(features_list, pred_ppl, pred_time)]
 
+    # Apply efficiency constraint: reject >max_slowdown unless big PPL gains
+    # A candidate passes if: time <= max_slowdown * baseline OR ppl_gain >= min_ppl_gain_for_slow
+    def passes_efficiency_constraint(ppl, time):
+        slowdown_ratio = time / baseline_time if baseline_time > 0 else 0
+        ppl_gain = (baseline_ppl - ppl) / baseline_ppl if baseline_ppl > 0 else 0
+        # Pass if fast enough OR has sufficient PPL improvement
+        return slowdown_ratio <= max_slowdown or ppl_gain >= min_ppl_gain_for_slow
+
+    filtered = [c for c in all_with_preds if passes_efficiency_constraint(c[4], c[5])]
+    rejected_count = len(all_with_preds) - len(filtered)
+    if rejected_count > 0:
+        print(f"  Efficiency filter: rejected {rejected_count} candidates (>{max_slowdown}x slower without {min_ppl_gain_for_slow*100:.0f}%+ PPL gain)")
+
     # Rank by selected criterion (lower is better for all)
     if screen_by == "ppl":
-        ranked = sorted(all_with_preds, key=lambda x: x[4])
+        ranked = sorted(filtered, key=lambda x: x[4])
     elif screen_by == "time":
-        ranked = sorted(all_with_preds, key=lambda x: x[5])
+        ranked = sorted(filtered, key=lambda x: x[5])
     else:  # efficiency (default)
-        ranked = sorted(all_with_preds, key=lambda x: compute_efficiency(x[4], x[5]))
+        ranked = sorted(filtered, key=lambda x: compute_efficiency(x[4], x[5]))
 
-    # Return top_k and all
+    # Return top_k and all (including rejected for logging)
     top_k_cands = [(c[0], c[1], c[2], c[4]) for c in ranked[:top_k]]  # components, strategy, temp, pred_ppl
     return top_k_cands, all_with_preds
 
@@ -730,7 +800,8 @@ def main():
     n_to_train = 3  # Only train top 3
     n_layers = 14  # Use 14 layers (good balance)
     # Expanded strategy rotation for better search space coverage
-    strategies = ['greedy', 'random', 'diverse', 'exploratory']
+    # findings_guided uses patterns learned from previous experiments
+    strategies = ['greedy', 'random', 'diverse', 'exploratory', 'findings_guided']
 
     # Load existing candidate hashes to avoid re-dreaming
     existing_hashes = get_existing_candidate_hashes(db)
@@ -799,8 +870,17 @@ def main():
         print("PHASE 2: Screening with surrogate model")
         print("=" * 70)
 
+        # Load efficiency constraints from findings DB
+        constraints = db.get_efficiency_constraints()
+        print(f"  Loaded constraints from findings: max_slowdown={constraints['max_slowdown']}x, "
+              f"min_ppl_gain={constraints['min_ppl_gain_for_slow']*100:.0f}%")
+
         screened, all_candidates_with_preds = screen_candidates_with_surrogate(
-            candidates, n_layers, surrogate, top_k=n_to_train, screen_by="efficiency")
+            candidates, n_layers, surrogate, top_k=n_to_train, screen_by="efficiency",
+            max_slowdown=constraints['max_slowdown'],
+            min_ppl_gain_for_slow=constraints['min_ppl_gain_for_slow'],
+            baseline_time=constraints['baseline_time'],
+            baseline_ppl=constraints['baseline_ppl'])
 
         print(f"\nTop {len(screened)} candidates by predicted efficiency (PPL × √(time/300s)):")
         for i, (components, strategy, temp, pred_ppl) in enumerate(screened):

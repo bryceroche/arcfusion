@@ -2207,6 +2207,118 @@ class ArcFusionDB:
         """Get all findings associated with an experiment."""
         return self.list_findings(experiment_id=experiment_id)
 
+    def get_findings_by_tags(self, tags: list[str], match_all: bool = False) -> list[Finding]:
+        """Get findings matching any (or all) of the given tags.
+
+        Args:
+            tags: List of tags to search for
+            match_all: If True, finding must have ALL tags. If False, ANY tag matches.
+
+        Returns:
+            List of matching findings, sorted by relevance (most tags matched first)
+        """
+        all_findings = self.list_findings(limit=500)
+        results = []
+
+        for f in all_findings:
+            finding_tags = set(f.tags) if isinstance(f.tags, list) else set()
+            matched_tags = finding_tags & set(tags)
+
+            if match_all:
+                if set(tags) <= finding_tags:
+                    results.append((f, len(matched_tags)))
+            else:
+                if matched_tags:
+                    results.append((f, len(matched_tags)))
+
+        # Sort by number of matched tags (descending), then by confidence
+        results.sort(key=lambda x: (-x[1], x[0].confidence != 'high'))
+        return [f for f, _ in results]
+
+    def get_efficiency_constraints(self) -> dict:
+        """Get efficiency constraints from findings for architecture screening.
+
+        Returns:
+            Dict with constraint parameters:
+            - max_slowdown: Maximum allowed slowdown ratio vs baseline (default 1.5)
+            - min_ppl_gain_for_slow: Min PPL improvement to allow slower models (default 0.15)
+            - baseline_time: Reference time in seconds (default 300)
+            - baseline_ppl: Reference PPL (default 282)
+        """
+        import re
+
+        # Defaults (strict: only allow slowdown for major PPL gains)
+        constraints = {
+            'max_slowdown': 1.5,
+            'min_ppl_gain_for_slow': 0.30,  # 30% PPL improvement required
+            'baseline_time': 300.0,
+            'baseline_ppl': 282.0,
+        }
+
+        # Look for efficiency constraint findings
+        findings = self.get_findings_by_tags(['efficiency', 'constraint', 'screening'])
+
+        for f in findings:
+            text = f"{f.title} {f.description}".lower()
+
+            # Parse slowdown ratio (e.g., ">1.5x slower", "1.5x")
+            slowdown_match = re.search(r'>?\s*(\d+\.?\d*)\s*x\s*slower', text)
+            if slowdown_match:
+                constraints['max_slowdown'] = float(slowdown_match.group(1))
+
+            # Parse PPL gain threshold (e.g., "15%+ PPL", "15% improvement")
+            ppl_match = re.search(r'(\d+\.?\d*)\s*%\+?\s*(?:ppl|improvement|gain)', text)
+            if ppl_match:
+                constraints['min_ppl_gain_for_slow'] = float(ppl_match.group(1)) / 100.0
+
+        return constraints
+
+    def get_architecture_patterns(self) -> list[dict]:
+        """Get architecture patterns from findings to guide dreaming.
+
+        Returns:
+            List of pattern dicts with:
+            - pattern: Short description of the pattern
+            - recommendation: What to do based on this pattern
+            - confidence: high/medium/low
+            - delta: PPL improvement vs baseline (negative = better)
+        """
+        patterns = []
+        findings = self.get_findings_by_tags(['architecture-pattern', 'mamba', 'attention', 'hybrid'])
+
+        for f in findings:
+            pattern = {
+                'pattern': f.title,
+                'recommendation': '',
+                'confidence': f.confidence,
+                'delta': f.delta_vs_baseline,
+                'tags': f.tags if isinstance(f.tags, list) else [],
+            }
+
+            # Generate recommendations based on finding content
+            # Skip historical/deprecated findings
+            finding_tags = f.tags if isinstance(f.tags, list) else []
+            if 'historical' in finding_tags or 'deprecated' in finding_tags:
+                continue
+            if 'exceeds' in f.title.lower() or 'not recommended' in f.title.lower():
+                continue
+
+            title_lower = f.title.lower()
+            if 'more mamba' in title_lower and 'better' in title_lower:
+                pattern['recommendation'] = 'favor_mamba_layers'
+            elif 'attention' in title_lower and 'end' in title_lower:
+                pattern['recommendation'] = 'place_attention_at_end'
+            elif 'sweet spot' in title_lower:
+                pattern['recommendation'] = 'prefer_hybrid'
+            elif 'beat' in title_lower or 'better' in title_lower:
+                if f.delta_vs_baseline < -10:
+                    pattern['recommendation'] = 'high_quality_option'
+
+            if pattern['recommendation']:
+                patterns.append(pattern)
+
+        return patterns
+
     # -------------------------------------------------------------------------
     # Training insight operations
     # -------------------------------------------------------------------------
